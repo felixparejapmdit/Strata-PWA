@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #f7f7f5;
+  --color-canvas: #ebebeb;
+  --color-ink: #2f2f2f;
+  --color-mute: #7a7a7a;
+  --color-faint: #a3a3a0;
+  --color-line: #e6e6e3;
+  --color-hover: #efefed;
+  --color-accent: #3366ff;
+  --color-accent-strong: #2450e0;
+  --color-accent-soft: #ebf0ff;
+  --color-danger: #e5484d;
+  --color-ok: #16a34a;
+  --font-sans: var(--font-inter), "Segoe UI", system-ui, sans-serif;
+  --shadow-float: 0 1px 2px rgb(0 0 0 / 0.04), 0 8px 24px rgb(0 0 0 / 0.08);
+  --shadow-peek: -12px 0 40px rgb(0 0 0 / 0.1);
+  --animate-peek-in: peek-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-pop-in: pop-in 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-toast-in: toast-in 0.2s ease-out;
+}
+
+@keyframes peek-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+@keyframes pop-in {
+  from { transform: scale(0.97) translateY(4px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+@keyframes toast-in {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+html, body {
+  height: 100%;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+body {
+  overflow: hidden;
+}
+
+::selection {
+  background: var(--color-accent-soft);
+}
+
+.dot-grid {
+  background-color: var(--color-canvas);
+  background-image: radial-gradient(rgb(0 0 0 / 0.09) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(0 0 0 / 0.15) transparent;
+}
+
+input[type="range"].range {
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-line);
+  outline: none;
+}
+input[type="range"].range::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid rgb(0 0 0 / 0.18);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.12);
+  cursor: pointer;
+}
+input[type="range"].range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid rgb(0 0 0 / 0.18);
+  cursor: pointer;
+}
+
+/* Drag & drop: the screen dims and only drop zones stay lit. */
+.dragging .drop-zone {
+  position: relative;
+  z-index: 45;
+  outline: 2px dashed var(--color-accent);
+  outline-offset: 2px;
+  background-color: var(--color-accent-soft);
+  border-radius: 10px;
+}
+.dragging .drop-zone.drop-over {
+  outline-style: solid;
+  box-shadow: 0 0 0 6px rgb(51 102 255 / 0.15);
+}
+
+.hatch {
+  background-image: repeating-linear-gradient(45deg, rgb(239 68 68 / 0.5) 0 2px, transparent 2px 6px);
+}
+
+@media print {
+  body { overflow: visible; }
+}
