@@ -42,6 +42,28 @@ function requireOnline(): boolean {
   return false;
 }
 
+/** True on hosts where ComfyUI's model cache can overflow memory (CPU inference, or little RAM/VRAM). */
+function memoryTight(): boolean {
+  const d = get().doctor;
+  if (!d?.online) return false;
+  const GB = 1024 ** 3;
+  return d.device?.type === "cpu" || (d.ramFree ?? Infinity) < 3 * GB || (d.device?.type === "cuda" && d.device.vramTotal < 8 * GB);
+}
+
+/**
+ * ComfyUI keeps every model it has loaded (checkpoint, ControlNets, CLIP Vision, SAM3) cached.
+ * On an 8 GB CPU machine that overflows RAM and the next job thrashes swap for hours, so ask
+ * ComfyUI to evict its cache before queueing. The flag is honoured before the next prompt runs.
+ */
+async function freeComfyMemoryIfTight() {
+  if (!memoryTight()) return;
+  await fetch("/api/comfy/free", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ unload_models: true, free_memory: true }),
+  }).catch(() => {});
+}
+
 /** Surfaces that will be repainted: enabled, masked, and given a reference or material. */
 export function activeSurfaces(p: Project | null = get().project): BucketId[] {
   if (!p) return [];
@@ -64,10 +86,11 @@ export async function runSegmentation(only?: LayerId[]) {
   try {
     const edit = (await getBlob(p.base.editBlobId))!;
     const image = await comfy().upload(edit, `${p.id}_seg.png`);
-    const graph = buildSegmentationGraph({ image, samCheckpoint: models.sam, layers, prefix: `strata/${p.id}_seg` });
+    const graph = buildSegmentationGraph({ image, samCheckpoint: models.sam, layers, prefix: `strata/${p.id}_seg`, refineIterations: memoryTight() ? 1 : 2 });
     applyDefaults(graph.prompt, info);
     const problems = validatePrompt(graph.prompt, info);
     if (problems.length) throw new Error(problems[0]);
+    await freeComfyMemoryIfTight();
     updateJob({ stage: "Loading SAM3" });
     const outputs = await comfy().run(graph.prompt, graph.stages, {
       onStage: (stage) => updateJob({ stage }),
@@ -175,6 +198,7 @@ export async function generate() {
     if (problems.length) throw new Error(problems.slice(0, 2).join(" "));
     graph.warnings.forEach((w) => toast(w, "info"));
 
+    await freeComfyMemoryIfTight();
     updateJob({ stage: "Queued" });
     const outputs = await comfy().run(graph.prompt, graph.stages, {
       onStage: (stage) => updateJob({ stage, value: 0, max: 0 }),

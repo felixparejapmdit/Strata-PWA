@@ -8,6 +8,8 @@ export interface SegmentationRequest {
   samCheckpoint: string;
   layers: LayerId[];
   prefix: string;
+  /** SAM decoder refinement passes per detection; 1 is much cheaper on CPU. */
+  refineIterations?: number;
 }
 
 export interface SegmentationGraph {
@@ -40,7 +42,7 @@ export function buildSegmentationGraph(req: SegmentationRequest): SegmentationGr
         image: Graph.out(image, 0),
         conditioning: Graph.out(text, 0),
         threshold: info.threshold,
-        refine_iterations: 2,
+        refine_iterations: req.refineIterations ?? 2,
         individual_masks: false,
       },
       `Detect ${info.label}`,
