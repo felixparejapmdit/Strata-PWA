@@ -1,13 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ImagePlus, Download, Trash2, Loader2 } from "lucide-react";
+import { ImagePlus, Download, Trash2, Loader2, Maximize2 } from "lucide-react";
 import { masksChanged, patchProject, setBaseImage, useStore } from "@/lib/store";
 import { masks } from "@/lib/masks";
 import { LAYERS, LAYER_INFO } from "@/lib/buckets";
 import { canvas as makeCanvas, ctx2d, magicWand, subtractMask, unionInto } from "@/lib/image";
 import { deleteBlobs } from "@/lib/db";
-import { downloadRender } from "@/lib/pipeline";
+import { downloadRender, upscaleRender } from "@/lib/pipeline";
 import { CanvasToolbar } from "./CanvasToolbar";
 import { BlobImg, Button, cx, useBlobUrl, useDropTarget } from "./ui";
 
@@ -402,6 +402,7 @@ function EmptyState() {
 
 function Filmstrip() {
   const project = useStore((s) => s.project)!;
+  const job = useStore((s) => s.job);
   const active = project.renders.find((r) => r.id === project.activeRenderId);
   return (
     <div
@@ -427,6 +428,16 @@ function Filmstrip() {
       </div>
       {active && (
         <div className="flex shrink-0 items-center border-l border-line pl-1.5">
+          {!active.finalBlobId && (
+            <button
+              className="flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-accent hover:bg-accent-soft disabled:text-faint disabled:hover:bg-transparent"
+              title="Upscale this render to 4K for print and the proposal"
+              disabled={!!job}
+              onClick={() => void upscaleRender(active.id)}
+            >
+              <Maximize2 size={13} /> 4K
+            </button>
+          )}
           <button className="grid h-8 w-8 place-items-center rounded-md text-mute hover:bg-hover hover:text-ink" title="Download render" onClick={() => void downloadRender(active, project.name)}>
             <Download size={15} />
           </button>

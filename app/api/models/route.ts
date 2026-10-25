@@ -1,6 +1,6 @@
 import { getConfig } from "@/lib/server/config";
 import { MODEL_CATALOG, CUSTOM_NODES } from "@/lib/models-catalog";
-import { cancelJob, getJob, isInstalled, partialBytes, startModelDownload, startNodeInstall } from "@/lib/server/downloads";
+import { cancelJob, getJob, isInstalled, partialBytes, startConversion, startModelDownload, startNodeInstall } from "@/lib/server/downloads";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +25,13 @@ export async function POST(req: Request) {
   if (body.model) {
     const m = MODEL_CATALOG.find((x) => x.id === body.model);
     if (!m) return Response.json({ error: "Unknown model" }, { status: 404 });
-    startModelDownload(comfyPath, m);
+    if (m.convertFrom) {
+      const source = MODEL_CATALOG.find((x) => x.id === m.convertFrom)!;
+      if (!isInstalled(comfyPath, source)) return Response.json({ error: `Install "${source.name}" first.` }, { status: 400 });
+      startConversion(comfyPath, m, source);
+    } else {
+      startModelDownload(comfyPath, m);
+    }
     return Response.json({ ok: true, job: getJob(m.id) });
   }
   if (body.node) {

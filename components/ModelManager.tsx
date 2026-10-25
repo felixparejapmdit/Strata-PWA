@@ -91,9 +91,9 @@ export function ModelManager() {
                 <span className="text-[13px] font-medium">{m.name}</span>
                 {m.required ? <span className="rounded bg-paper px-1.5 text-[10px] text-mute">required</span> : <span className="rounded px-1.5 text-[10px] text-faint ring-1 ring-line">optional</span>}
               </div>
-              <div className="mt-0.5 truncate text-[11px] text-faint">models/{m.dir}/{m.filename} · {formatBytes(m.bytes)}</div>
+              <div className="mt-0.5 truncate text-[11px] text-faint">models/{m.dir}/{m.filename} · {m.convertFrom ? "made locally from the encoder above" : formatBytes(m.bytes)}</div>
               {m.note && <div className="mt-1 text-xs leading-snug text-mute">{m.note}</div>}
-              {m.job?.status === "running" && <Progress job={m.job} />}
+              {m.job?.status === "running" && (m.convertFrom ? <div className="mt-1 flex items-center gap-1.5 text-xs text-mute"><Loader2 size={12} className="animate-spin" /> Converting (about a minute)…</div> : <Progress job={m.job} />)}
               {m.job?.status === "error" && <div className="mt-1 text-xs text-danger">{m.job.error}</div>}
               {m.job?.status !== "running" && m.partial > 0 && (
                 <div className="mt-1 text-xs text-mute">Paused at {formatBytes(m.partial)} of {formatBytes(m.bytes)} ({Math.round((m.partial / m.bytes) * 100)}%). Resume continues from there.</div>
@@ -106,7 +106,7 @@ export function ModelManager() {
                 <Button size="sm" onClick={() => void cancel(m.id)}><X size={12} /> Cancel</Button>
               ) : (
                 <Button size="sm" variant={m.required ? "primary" : "secondary"} disabled={!data.comfyPath} onClick={() => void start({ model: m.id })}>
-                  <Download size={12} /> {m.partial > 0 || m.job?.status === "error" || m.job?.status === "cancelled" ? "Resume" : "Download"}
+                  <Download size={12} /> {m.convertFrom ? "Convert" : m.partial > 0 || m.job?.status === "error" || m.job?.status === "cancelled" ? "Resume" : "Download"}
                 </Button>
               )}
             </div>

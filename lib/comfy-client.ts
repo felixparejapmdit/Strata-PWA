@@ -23,6 +23,14 @@ export class CancelledError extends Error {
   }
 }
 
+export class ComfyCrashedError extends Error {
+  constructor() {
+    super(
+      "ComfyUI stopped during the job. It most likely ran out of memory: close heavy apps, convert CLIP Vision to fp16 in Model Manager, restart ComfyUI, then try again.",
+    );
+  }
+}
+
 class ComfyClient {
   readonly clientId = "strata-" + Math.random().toString(36).slice(2, 12);
   private source: EventSource | null = null;
@@ -132,13 +140,35 @@ class ComfyClient {
       };
       this.listeners.add(listener);
 
-      // Safety net if the event stream drops mid-run.
+      // Safety net if the event stream drops mid-run. A prompt that is in neither the history nor
+      // the queue was lost (ComfyUI restarted); fail instead of waiting forever.
+      let missing = 0;
+      let refused = 0;
+      let inFlight = false;
       poll = setInterval(async () => {
+        // A swapping machine can take a minute to answer; never stack polls behind a slow one.
+        if (inFlight || finished) return;
+        inFlight = true;
         try {
-          const h = await (await fetch(`/api/comfy/history/${promptId}`)).json();
-          if (h[promptId]?.status?.completed || h[promptId]?.status?.status_str === "error") void complete();
+          const res = await fetch(`/api/comfy/history/${promptId}`);
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            // Only "connection refused" means ComfyUI is gone; timeouts mean it is busy (often paging).
+            if (body.code === "ECONNREFUSED" && ++refused >= 3) fail(new ComfyCrashedError());
+            return;
+          }
+          const h = await res.json();
+          refused = 0;
+          if (h[promptId]?.status?.completed || h[promptId]?.status?.status_str === "error") return void complete();
+          if (h[promptId]) return;
+          const q = (await (await fetch("/api/comfy/queue")).json()) as { queue_running: unknown[][]; queue_pending: unknown[][] };
+          const queued = [...q.queue_running, ...q.queue_pending].some((item) => item[1] === promptId);
+          missing = queued ? 0 : missing + 1;
+          if (missing >= 2) fail(new Error("ComfyUI lost this job (it may have restarted). Please run it again."));
         } catch {
-          // ComfyUI briefly unreachable; keep waiting
+          // Strata's own server unreachable; keep waiting
+        } finally {
+          inFlight = false;
         }
       }, 4000);
     });

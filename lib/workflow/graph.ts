@@ -83,8 +83,8 @@ export function validatePrompt(prompt: ApiPrompt, info: ObjectInfo): string[] {
         continue;
       }
       const options = Array.isArray(spec[0]) ? (spec[0] as string[]) : spec[0] === "COMBO" ? (spec[1]?.options as string[] | undefined) : undefined;
-      // Upload-backed combos (LoadImage) list only files present at query time, so skip them.
-      if (options && typeof value === "string" && !options.includes(value) && !spec[1]?.image_upload && !/^Load.*Image/.test(node.class_type)) {
+      // File-backed combos (LoadImage, LoadEmbeds) list only files present at query time, so skip them.
+      if (options && typeof value === "string" && !options.includes(value) && !spec[1]?.image_upload && !/^Load.*Image|LoadEmbeds$/.test(node.class_type)) {
         problems.push(`"${value}" is not available for ${node.class_type}.${name}. Download it in Model Manager.`);
       }
     }

@@ -72,6 +72,8 @@ export interface ProjectMeta {
 }
 
 export interface GenSettings {
+  /** See migrateSettings(); absent on projects saved before versioning. */
+  settingsVersion?: number;
   profile: PipelineProfile;
   checkpoint: string;
   /** -1 = random per render. */
@@ -93,6 +95,8 @@ export interface GenSettings {
   workLongSide: number;
   maskGrow: number;
   maskFeather: number;
+  /** Diffuse only the edited region plus context instead of the whole frame (absent = on). */
+  cropToMask?: boolean;
   extraPrompt: string;
   negativePrompt: string;
 }

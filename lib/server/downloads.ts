@@ -175,7 +175,8 @@ export function findComfyPython(comfyPath: string): string | null {
 
 function run(job: Job, cmd: string, args: string[], cwd: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    job.log.push(`$ ${path.basename(cmd)} ${args.join(" ")}`);
+    // Inline scripts and full paths would flood the log panel; show their short forms.
+    job.log.push(`$ ${path.basename(cmd)} ${args.map((a) => (a.includes("\n") ? "<script>" : path.basename(a))).join(" ")}`);
     const child = spawn(cmd, args, { cwd, windowsHide: true });
     job.abort = () => child.kill();
     const onData = (d: Buffer) => job.log.push(...d.toString().split(/\r?\n/).filter(Boolean).slice(-4));
@@ -184,6 +185,42 @@ function run(job: Job, cmd: string, args: string[], cwd: string): Promise<void> 
     child.on("error", reject);
     child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`${path.basename(cmd)} exited with ${code}`))));
   });
+}
+
+// Streams tensors one at a time so peak memory is ~1x the fp16 output, not fp32 + fp16 together.
+const FP16_CONVERT = `
+import os, sys
+from safetensors import safe_open
+from safetensors.torch import save_file
+src, dst = sys.argv[1], sys.argv[2]
+out = {}
+with safe_open(src, framework="pt") as f:
+    for key in f.keys():
+        t = f.get_tensor(key)
+        out[key] = t.half() if t.is_floating_point() else t
+        del t
+save_file(out, dst + ".part", metadata={"converted_by": "strata", "source": os.path.basename(src)})
+os.replace(dst + ".part", dst)
+print("wrote", dst, os.path.getsize(dst))
+`;
+
+/** Builds a derived catalogue model (e.g. an fp16 copy) with this ComfyUI's own Python. */
+export function startConversion(comfyPath: string, target: CatalogModel, source: CatalogModel): Job {
+  const existing = jobs.get(target.id);
+  if (existing?.status === "running") return existing;
+  const job: Job = { id: target.id, kind: "model", status: "running", received: 0, total: 0, speed: 0, log: ["Converting"], startedAt: Date.now() };
+  jobs.set(target.id, job);
+  (async () => {
+    if (!isInstalled(comfyPath, source)) throw new Error(`Install "${source.name}" first.`);
+    const py = findComfyPython(comfyPath);
+    if (!py) throw new Error("Could not find ComfyUI's Python.");
+    await run(job, py, ["-c", FP16_CONVERT, modelPath(comfyPath, source), modelPath(comfyPath, target)], comfyPath);
+    job.status = "done";
+  })().catch((e: unknown) => {
+    job.status = "error";
+    job.error = e instanceof Error ? e.message : String(e);
+  });
+  return job;
 }
 
 /** git clone + pip install -r requirements.txt into this ComfyUI's own Python. */

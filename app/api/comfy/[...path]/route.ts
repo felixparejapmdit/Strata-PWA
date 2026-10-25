@@ -37,7 +37,9 @@ async function proxy(req: Request, ctx: { params: Promise<{ path: string[] }> })
     return new Response(res.body, { status: res.status, headers: out });
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
-    return Response.json({ error: `ComfyUI unreachable at ${comfyUrl}`, detail: reason, offline: true }, { status: 502 });
+    // Refused = no process listening (crashed or stopped); a timeout means it is alive but busy.
+    const code = (e as { cause?: { code?: string } }).cause?.code ?? (e instanceof Error && e.name === "TimeoutError" ? "TIMEOUT" : undefined);
+    return Response.json({ error: `ComfyUI unreachable at ${comfyUrl}`, detail: reason, offline: true, code }, { status: 502 });
   }
 }
 

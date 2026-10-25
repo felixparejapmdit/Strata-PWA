@@ -15,6 +15,8 @@ export interface CatalogModel {
   /** Part of the minimum set the profile needs to render. */
   required: boolean;
   note?: string;
+  /** Produced locally from another catalogue model instead of downloaded (url is unused). */
+  convertFrom?: string;
 }
 
 /**
@@ -46,6 +48,19 @@ export const MODEL_CATALOG: CatalogModel[] = [
     profiles: ["lite", "studio"],
     required: true,
     note: "Encodes your reference images for IP-Adapter.",
+  },
+  {
+    id: "clip-vision-h-fp16",
+    name: "CLIP ViT-H/14 image encoder (fp16, low-memory)",
+    role: "clip_vision",
+    dir: "clip_vision",
+    filename: "CLIP-ViT-H-14-laion2B-s32B-b79K.fp16.safetensors",
+    url: "",
+    bytes: 0,
+    profiles: ["lite", "studio"],
+    required: false,
+    convertFrom: "clip-vision-h",
+    note: "Half-size copy of the encoder above, made locally. ComfyUI already runs it in fp16 on CPU, so results are identical, but loading no longer needs ~3.8 GB at once. Recommended on 8 GB machines.",
   },
   {
     id: "ultrasharp",

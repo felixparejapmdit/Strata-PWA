@@ -94,6 +94,25 @@ export async function maskFromBwBlob(blob: Blob, w: number, h: number): Promise<
   return c;
 }
 
+/** Bounding box of the mask's set pixels, scaled to (w,h); null when the mask is empty. */
+export function maskBBox(m: MaskCanvas, w = m.width, h = m.height): { x: number; y: number; width: number; height: number } | null {
+  const d = ctx2d(m).getImageData(0, 0, m.width, m.height).data;
+  let x0 = m.width, y0 = m.height, x1 = -1, y1 = -1;
+  for (let y = 0; y < m.height; y++) {
+    for (let x = 0; x < m.width; x++) {
+      if (d[(y * m.width + x) * 4 + 3] > 127) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return null;
+  const sx = w / m.width, sy = h / m.height;
+  return { x: Math.floor(x0 * sx), y: Math.floor(y0 * sy), width: Math.ceil((x1 - x0 + 1) * sx), height: Math.ceil((y1 - y0 + 1) * sy) };
+}
+
 export function maskCoverage(m: MaskCanvas): number {
   const d = ctx2d(m).getImageData(0, 0, m.width, m.height).data;
   let on = 0;

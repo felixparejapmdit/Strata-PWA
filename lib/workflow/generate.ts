@@ -1,6 +1,8 @@
 import type { BucketId, GenSettings } from "../types";
 import { Graph, type ApiPrompt, type Link } from "./graph";
 import { PROFILES, type ResolvedModels } from "./profiles";
+import type { Rect } from "./crop";
+import type { EmbedFiles } from "./embeds";
 
 export interface SurfaceInput {
   bucket: BucketId;
@@ -10,6 +12,8 @@ export interface SurfaceInput {
   refs: string[];
   weight: number;
   prompt: string;
+  /** Pre-encoded IP-Adapter embeddings for `refs`; when set, CLIP Vision is not loaded for this surface. */
+  embeds?: EmbedFiles;
 }
 
 export interface GenerationRequest {
@@ -28,6 +32,8 @@ export interface GenerationRequest {
   globalPrompt: string;
   seed: number;
   prefix: string;
+  /** Diffuse only this region (work px, 8-aligned) and paste it back; see planCrop(). */
+  crop?: Rect | null;
 }
 
 export interface GenerationGraph {
@@ -43,7 +49,8 @@ export interface GenerationGraph {
  *   lines (Canny, texture inside editable areas removed) + optional depth → ControlNet
  *   reference images → IP-Adapter, one pass per surface, scoped by attn_mask
  *   material text → regional conditioning per surface mask
- *   sampling only inside the union mask (SetLatentNoiseMask)
+ *   sampling only inside the union mask (SetLatentNoiseMask), on a crop around it when that is
+ *   much smaller than the frame (diffusion cost scales with pixel count)
  *   composite onto the untouched original, so pixels outside the masks are byte-identical
  *   4K: ESRGAN (lite) or Ultimate SD Upscale + re-composite over the ESRGAN'd original (studio)
  */
@@ -76,9 +83,16 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
   const base = g.add("LoadImage", { image: req.baseImage }, "Base image");
   const hard = g.add("LoadImageMask", { image: req.unionHard, channel: "red" }, "Editable area");
   const soft = g.add("LoadImageMask", { image: req.unionSoft, channel: "red" }, "Blend mask");
+  // Everything diffusion sees is cut to the crop; full-frame inputs stay for the final composite.
+  const crop = req.crop ?? null;
+  const area = crop ?? { x: 0, y: 0, width: req.width, height: req.height };
+  const cropMask = (mask: Link): Link => (crop ? Graph.out(g.add("CropMask", { mask, ...crop }), 0) : mask);
+  const work: Link = crop ? Graph.out(g.add("ImageCrop", { image: Graph.out(base, 0), ...crop }, "Edit region"), 0) : Graph.out(base, 0);
+  const workHard = cropMask(Graph.out(hard, 0));
+  const workSoft = cropMask(Graph.out(soft, 0));
   const surfaceMasks: Partial<Record<BucketId, Link>> = {};
   for (const surf of req.surfaces) {
-    surfaceMasks[surf.bucket] = Graph.out(g.add("LoadImageMask", { image: surf.mask, channel: "red" }, `${surf.bucket} mask`), 0);
+    surfaceMasks[surf.bucket] = cropMask(Graph.out(g.add("LoadImageMask", { image: surf.mask, channel: "red" }, `${surf.bucket} mask`), 0));
   }
 
   // Text conditioning: global + one masked region per surface
@@ -95,10 +109,10 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
 
   // Line lock: Canny edges with the old surface texture blanked out (eroded mask keeps boundary lines)
   if (m.lineControlNet && s.lineStrength > 0) {
-    const canny = g.add("Canny", { image: Graph.out(base, 0), low_threshold: 0.2, high_threshold: 0.45 }, "Structure lines");
+    const canny = g.add("Canny", { image: work, low_threshold: 0.2, high_threshold: 0.45 }, "Structure lines");
     stages[canny] = "Analysing structure";
-    const eroded = g.add("GrowMask", { mask: Graph.out(hard, 0), expand: -8, tapered_corners: true });
-    const black = g.add("EmptyImage", { width: req.width, height: req.height, batch_size: 1, color: 0 });
+    const eroded = g.add("GrowMask", { mask: workHard, expand: -8, tapered_corners: true });
+    const black = g.add("EmptyImage", { width: area.width, height: area.height, batch_size: 1, color: 0 });
     const lines = g.add("ImageCompositeMasked", {
       destination: Graph.out(canny, 0),
       source: Graph.out(black, 0),
@@ -128,7 +142,7 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
   if (s.useDepth) {
     if (m.depthControlNet && m.depthModel && m.hasDepthAnything) {
       const da3 = g.add("LoadDA3Model", { model_name: m.depthModel, weight_dtype: "default" }, "Depth Anything 3");
-      const geo = g.add("DA3Inference", { da3_model: Graph.out(da3, 0), image: Graph.out(base, 0), resolution: 504, resize_method: "upper_bound_resize", mode: "mono" });
+      const geo = g.add("DA3Inference", { da3_model: Graph.out(da3, 0), image: work, resolution: 504, resize_method: "upper_bound_resize", mode: "mono" });
       stages[geo] = "Estimating depth";
       const depth = g.add("DA3Render", { da3_geometry: Graph.out(geo, 0), output: "depth", "output.normalization": "v2_style", "output.apply_sky_clip": false }, "Depth map");
       let cn: Link = Graph.out(g.add("ControlNetLoader", { control_net_name: m.depthControlNet }, "Depth ControlNet"), 0);
@@ -152,10 +166,35 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
   // Material transfer: one IP-Adapter pass per surface, confined to that surface's mask
   const withRefs = req.surfaces.filter((x) => x.refs.length);
   if (withRefs.length) {
-    if (m.hasIpAdapter && m.ipadapter && m.clipVision) {
+    const needsEncoder = withRefs.some((x) => !x.embeds);
+    if (m.hasIpAdapter && m.ipadapter && (m.clipVision || !needsEncoder)) {
       const ipa = g.add("IPAdapterModelLoader", { ipadapter_file: m.ipadapter }, "IP-Adapter");
-      const cv = g.add("CLIPVisionLoader", { clip_name: m.clipVision }, "CLIP Vision");
+      // CLIP Vision is the largest optional model; skip it when every surface brings its embeddings.
+      const cv = needsEncoder ? g.add("CLIPVisionLoader", { clip_name: m.clipVision }, "CLIP Vision") : null;
       for (const surf of withRefs) {
+        if (surf.embeds) {
+          const pos = g.add("IPAdapterLoadEmbeds", { embeds: surf.embeds.pos }, `${surf.bucket} embedding`);
+          const neg = g.add("IPAdapterLoadEmbeds", { embeds: surf.embeds.neg });
+          const node = g.add(
+            "IPAdapterEmbeds",
+            {
+              model,
+              ipadapter: Graph.out(ipa, 0),
+              pos_embed: Graph.out(pos, 0),
+              neg_embed: Graph.out(neg, 0),
+              weight: surf.weight,
+              weight_type: spec.ipaWeightType,
+              start_at: 0,
+              end_at: 1,
+              embeds_scaling: "V only",
+              attn_mask: surfaceMasks[surf.bucket],
+            },
+            `Apply ${surf.bucket} material`,
+          );
+          stages[node] = "Applying reference materials";
+          model = Graph.out(node, 0);
+          continue;
+        }
         let img: Link = Graph.out(g.add("LoadImage", { image: surf.refs[0] }, `${surf.bucket} reference`), 0);
         for (const extra of surf.refs.slice(1)) {
           const next = g.add("LoadImage", { image: extra });
@@ -174,7 +213,7 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
             end_at: 1,
             embeds_scaling: "V only",
             attn_mask: surfaceMasks[surf.bucket],
-            clip_vision: Graph.out(cv, 0),
+            clip_vision: Graph.out(cv!, 0),
           },
           `Apply ${surf.bucket} material`,
         );
@@ -187,9 +226,9 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
   }
 
   // Sample only inside the editable area
-  const latent = g.add("VAEEncode", { pixels: Graph.out(base, 0), vae });
+  const latent = g.add("VAEEncode", { pixels: work, vae });
   stages[latent] = "Encoding base image";
-  const noiseMasked = g.add("SetLatentNoiseMask", { samples: Graph.out(latent, 0), mask: Graph.out(hard, 0) });
+  const noiseMasked = g.add("SetLatentNoiseMask", { samples: Graph.out(latent, 0), mask: workHard });
   const sampler = g.add(
     "KSampler",
     {
@@ -213,7 +252,7 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
   // Structural lock: everything outside the masks is the original image
   const locked = g.add(
     "ImageCompositeMasked",
-    { destination: Graph.out(base, 0), source: Graph.out(decoded, 0), x: 0, y: 0, resize_source: false, mask: Graph.out(soft, 0) },
+    { destination: Graph.out(base, 0), source: Graph.out(decoded, 0), x: area.x, y: area.y, resize_source: false, mask: workSoft },
     "Structure lock",
   );
   stages[locked] = "Locking structure";

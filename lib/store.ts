@@ -8,7 +8,7 @@ import * as db from "./db";
 import { masks } from "./masks";
 import { analyzeTexture } from "./texture";
 import { bitmapFromBlob, fitWithin, pixelsOf, resizeBlob } from "./image";
-import { checkpointsForProfile, defaultSettings, PROFILES } from "./workflow/profiles";
+import { checkpointsForProfile, defaultSettings, migrateSettings, PROFILES } from "./workflow/profiles";
 import type { ObjectInfo } from "./workflow/graph";
 
 export interface DoctorInfo {
@@ -20,6 +20,10 @@ export interface DoctorInfo {
   ramTotal?: number;
   ramFree?: number;
   recommendedProfile?: PipelineProfile;
+  /** Changes whenever objectInfo does; lets polls skip re-sending the schemas. */
+  infoKey?: string;
+  /** ComfyUI's launch arguments, e.g. ["main.py", "--cpu"]. */
+  argv?: string[];
   objectInfo?: ObjectInfo;
   error?: string;
 }
@@ -37,7 +41,7 @@ export interface Toast {
 }
 
 export interface JobState {
-  kind: "segment" | "generate" | "proposal";
+  kind: "segment" | "generate" | "upscale" | "proposal";
   stage: string;
   value: number;
   max: number;
@@ -154,9 +158,14 @@ export async function init() {
 
 export async function refreshDoctor(force = false) {
   try {
-    const res = await fetch(`/api/doctor${force ? "?refresh=1" : ""}`, { cache: "no-store" });
-    const doctor = (await res.json()) as DoctorInfo;
     const prev = get().doctor;
+    const q = new URLSearchParams();
+    if (force) q.set("refresh", "1");
+    else if (prev?.online && prev.infoKey && prev.objectInfo) q.set("have", prev.infoKey);
+    const res = await fetch(`/api/doctor?${q}`, { cache: "no-store" });
+    const doctor = (await res.json()) as DoctorInfo;
+    // Unchanged schemas are omitted from the response; keep the copy we already have.
+    if (doctor.online && !doctor.objectInfo && prev?.infoKey === doctor.infoKey) doctor.objectInfo = prev?.objectInfo;
     set({ doctor });
     if (prev && prev.online !== doctor.online) toast(doctor.online ? "ComfyUI connected" : "ComfyUI went offline", doctor.online ? "success" : "error");
   } catch {
@@ -205,7 +214,12 @@ export async function openProject(id: string) {
   await flushSave();
   const p = await db.loadProject(id);
   if (!p) return;
+  const migrated = migrateSettings(p.settings);
   set({ project: p, view: p.activeRenderId ? "compare" : "edit", maskVersion: get().maskVersion + 1 });
+  if (migrated.length) {
+    scheduleSave();
+    toast(`Render settings updated for faster CPU renders: ${migrated.join(", ")}.`, "info");
+  }
   await db.kvSet("lastProject", id);
   await masks.load(p);
   set({ maskVersion: get().maskVersion + 1, fitSignal: get().fitSignal + 1 });

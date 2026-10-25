@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { getConfig } from "@/lib/server/config";
 import { USED_NODES } from "@/lib/workflow/profiles";
 import type { ObjectInfo } from "@/lib/workflow/graph";
@@ -6,16 +7,20 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 interface SystemStats {
-  system: { os: string; ram_total: number; ram_free: number; comfyui_version: string };
+  system: { os: string; ram_total: number; ram_free: number; comfyui_version: string; argv?: string[] };
   devices: { name: string; type: string; vram_total: number; vram_free: number }[];
 }
 
 const cache = globalThis as unknown as { __strataObjectInfo?: { at: number; url: string; data: ObjectInfo } };
 
-/** ComfyUI health, hardware, and the schemas of the nodes Strata uses. */
+/**
+ * ComfyUI health, hardware, and the schemas of the nodes Strata uses. Schemas are ~33 KB and
+ * rarely change, so they are sent only when the caller's `have` key differs from `infoKey`.
+ */
 export async function GET(req: Request) {
   const { comfyUrl, comfyPath } = getConfig();
-  const refresh = new URL(req.url).searchParams.has("refresh");
+  const params = new URL(req.url).searchParams;
+  const refresh = params.has("refresh");
   try {
     const stats = (await (await fetch(`${comfyUrl}/system_stats`, { signal: AbortSignal.timeout(4000), cache: "no-store" })).json()) as SystemStats;
     let full = cache.__strataObjectInfo;
@@ -25,6 +30,7 @@ export async function GET(req: Request) {
     }
     const objectInfo: ObjectInfo = {};
     for (const n of USED_NODES) if (full.data[n]) objectInfo[n] = full.data[n];
+    const infoKey = createHash("sha1").update(JSON.stringify(objectInfo)).digest("hex").slice(0, 16);
 
     const dev = stats.devices[0];
     const cuda = !!dev && dev.type === "cuda";
@@ -37,8 +43,10 @@ export async function GET(req: Request) {
       device: dev ? { name: dev.name, type: dev.type, vramTotal: dev.vram_total, vramFree: dev.vram_free } : null,
       ramTotal: stats.system.ram_total,
       ramFree: stats.system.ram_free,
+      argv: stats.system.argv ?? [],
       recommendedProfile: cuda && vramGb >= 11 ? "studio" : "lite",
-      objectInfo,
+      infoKey,
+      ...(params.get("have") === infoKey ? {} : { objectInfo }),
     });
   } catch (e) {
     return Response.json({ online: false, comfyUrl, comfyPath, error: e instanceof Error ? e.message : String(e) });

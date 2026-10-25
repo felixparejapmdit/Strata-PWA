@@ -29,7 +29,8 @@ export const USED_NODES = [
   "ImageCompositeMasked", "LoadImage", "LoadImageMask", "LoadDA3Model", "DA3Inference", "DA3Render",
   "IPAdapterModelLoader", "CLIPVisionLoader", "IPAdapterAdvanced", "ImageBatch", "VAEEncode", "SetLatentNoiseMask",
   "KSampler", "VAEDecode", "SaveImage", "UpscaleModelLoader", "ImageUpscaleWithModel", "ImageScale",
-  "UltimateSDUpscale", "MaskToImage", "ImageToMask", "SAM3_Detect",
+  "UltimateSDUpscale", "MaskToImage", "ImageToMask", "SAM3_Detect", "ImageCrop", "CropMask",
+  "IPAdapterEncoder", "IPAdapterCombineEmbeds", "IPAdapterSaveEmbeds", "IPAdapterLoadEmbeds", "IPAdapterEmbeds",
 ];
 
 export const NEGATIVE_DEFAULT =
@@ -49,13 +50,14 @@ export const PROFILES: Record<PipelineProfile, ProfileSpec> = {
     depthUnionType: "",
     ipadapter: ["ip-adapter-plus_sd15.safetensors", "ip-adapter_sd15.safetensors"],
     ipaWeightType: "linear",
-    clipVision: ["CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"],
+    clipVision: ["CLIP-ViT-H-14-laion2B-s32B-b79K.fp16.safetensors", "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"],
     depthModel: ["depth_anything_3_small.safetensors", "depth_anything_3_base.safetensors", "depth_anything_3_mono_large.safetensors"],
     upscaleModels: ["4x-UltraSharp.pth", "RealESRGAN_x4plus.pth"],
     sam: ["sam3.1_multiplex_fp16.safetensors"],
     defaults: {
       steps: 6,
-      cfg: 1.5,
+      // CFG 1.0 makes ComfyUI skip the negative pass entirely (half the work per step).
+      cfg: 1,
       sampler: "lcm",
       scheduler: "sgm_uniform",
       useLcm: true,
@@ -63,7 +65,8 @@ export const PROFILES: Record<PipelineProfile, ProfileSpec> = {
       lineStrength: 0.85,
       useDepth: false,
       depthStrength: 0.55,
-      upscale: true,
+      // 4K on demand (filmstrip / proposal export): iterating at 768 px is far faster on CPU.
+      upscale: false,
       targetLongSide: 3840,
       workLongSide: 768,
       maskGrow: 4,
@@ -83,7 +86,7 @@ export const PROFILES: Record<PipelineProfile, ProfileSpec> = {
     depthUnionType: "depth",
     ipadapter: ["ip-adapter-plus_sdxl_vit-h.safetensors"],
     ipaWeightType: "style transfer",
-    clipVision: ["CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"],
+    clipVision: ["CLIP-ViT-H-14-laion2B-s32B-b79K.fp16.safetensors", "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"],
     depthModel: ["depth_anything_3_mono_large.safetensors", "depth_anything_3_base.safetensors", "depth_anything_3_small.safetensors"],
     upscaleModels: ["4x-UltraSharp.pth", "RealESRGAN_x4plus.pth"],
     sam: ["sam3.1_multiplex_fp16.safetensors"],
@@ -106,8 +109,12 @@ export const PROFILES: Record<PipelineProfile, ProfileSpec> = {
   },
 };
 
+/** Bumped when defaults change in a way saved projects should pick up; see migrateSettings(). */
+export const SETTINGS_VERSION = 2;
+
 export function defaultSettings(profile: PipelineProfile, checkpoint = ""): GenSettings {
   return {
+    settingsVersion: SETTINGS_VERSION,
     profile,
     checkpoint: checkpoint || PROFILES[profile].checkpoints[0],
     seed: -1,
@@ -131,6 +138,26 @@ export interface ResolvedModels {
   hasIpAdapter: boolean;
   hasSam3: boolean;
   hasDepthAnything: boolean;
+}
+
+/**
+ * Brings settings saved under older defaults up to date. Only values still equal to the old
+ * default change, so anything the user tuned is kept. Returns what changed, for a notice.
+ */
+export function migrateSettings(s: GenSettings): string[] {
+  const changed: string[] = [];
+  if ((s.settingsVersion ?? 1) < 2 && s.profile === "lite") {
+    if (s.useLcm && s.cfg === 1.5) {
+      s.cfg = 1;
+      changed.push("CFG 1.0 (about 2× faster sampling)");
+    }
+    if (s.upscale) {
+      s.upscale = false;
+      changed.push("4K on demand instead of every render");
+    }
+  }
+  s.settingsVersion = SETTINGS_VERSION;
+  return changed;
 }
 
 /** Resolves each model slot against what ComfyUI actually has installed. */

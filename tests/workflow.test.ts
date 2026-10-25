@@ -4,7 +4,10 @@ import fs from "node:fs";
 import { applyDefaults, comboOptions, validatePrompt, type ObjectInfo } from "../lib/workflow/graph";
 import { buildGenerationGraph } from "../lib/workflow/generate";
 import { buildSegmentationGraph } from "../lib/workflow/segment";
-import { defaultSettings, fitDims, resolveModels } from "../lib/workflow/profiles";
+import { defaultSettings, fitDims, migrateSettings, resolveModels } from "../lib/workflow/profiles";
+import { planCrop } from "../lib/workflow/crop";
+import { buildUpscaleGraph } from "../lib/workflow/upscale";
+import { buildEncodeGraph } from "../lib/workflow/embeds";
 
 // Trimmed /object_info captured from a live ComfyUI 0.42 (CPU, SD1.5 models installed).
 const info = JSON.parse(fs.readFileSync(new URL("./fixtures/object_info.json", import.meta.url), "utf8")) as ObjectInfo;
@@ -72,7 +75,7 @@ test("resolveModels falls back to what this machine already has", () => {
 });
 
 test("lite generation graph validates against the live schema", () => {
-  const g = buildGenerationGraph(liteRequest({ useDepth: true }));
+  const g = buildGenerationGraph(liteRequest({ useDepth: true, upscale: true }));
   applyDefaults(g.prompt, fullLite);
   assert.deepEqual(validatePrompt(g.prompt, fullLite), []);
   assert.deepEqual(g.warnings, []);
@@ -145,4 +148,108 @@ test("fitDims snaps to multiples of 8 and keeps aspect", () => {
   const d = fitDims(1000, 333, 3840);
   assert.equal(d.width % 8, 0);
   assert.equal(d.height % 8, 0);
+});
+
+test("planCrop pads the edit region, keeps it inside the image and 8-aligned", () => {
+  const c = planCrop({ x: 20, y: 300, width: 300, height: 180 }, 768, 512)!;
+  assert.ok(c);
+  for (const v of [c.x, c.y, c.width, c.height]) assert.equal(v % 8, 0);
+  assert.ok(c.x <= 20 && c.y <= 300, "crop must contain the region");
+  assert.ok(c.x + c.width >= 320 && c.y + c.height >= 480);
+  assert.ok(c.x + c.width <= 768 && c.y + c.height <= 512, "crop must stay inside the image");
+  assert.ok(c.width >= 384 && c.height >= 384, "crop is grown to a usable size");
+});
+
+test("planCrop declines when the region already covers most of the frame", () => {
+  assert.equal(planCrop({ x: 0, y: 0, width: 760, height: 500 }, 768, 512), null);
+  assert.equal(planCrop(null, 768, 512), null);
+  assert.equal(planCrop({ x: 0, y: 0, width: 0, height: 0 }, 768, 512), null);
+});
+
+test("cropped graph diffuses the region and pastes it back at the crop offset", () => {
+  const crop = { x: 0, y: 128, width: 512, height: 384 };
+  const g = buildGenerationGraph({ ...liteRequest({ useDepth: true }), crop });
+  applyDefaults(g.prompt, fullLite);
+  assert.deepEqual(validatePrompt(g.prompt, fullLite), []);
+  const nodes = Object.entries(g.prompt);
+  const [cropId] = nodes.find(([, n]) => n.class_type === "ImageCrop")!;
+  // Canny, depth and VAE encode all read the crop, not the full base.
+  for (const t of ["Canny", "DA3Inference", "VAEEncode"]) {
+    const [, n] = nodes.find(([, x]) => x.class_type === t)!;
+    assert.deepEqual(n.inputs.image ?? n.inputs.pixels, [cropId, 0], `${t} must read the crop`);
+  }
+  const black = nodes.find(([, n]) => n.class_type === "EmptyImage")![1];
+  assert.equal(black.inputs.width, 512);
+  assert.equal(black.inputs.height, 384);
+  const lock = nodes.find(([, n]) => n._meta?.title === "Structure lock")![1];
+  assert.equal(lock.inputs.x, 0);
+  assert.equal(lock.inputs.y, 128);
+  const baseId = nodes.find(([, n]) => n._meta?.title === "Base image")![0];
+  assert.deepEqual(lock.inputs.destination, [baseId, 0], "paste-back target is the full untouched base");
+  assert.ok(nodes.filter(([, n]) => n.class_type === "CropMask").length >= 4, "hard, soft and every surface mask are cropped");
+});
+
+test("on-demand 4K is a pure ESRGAN pass (no diffusion, structure untouched)", () => {
+  const g = buildUpscaleGraph({ image: "strata/p_up.png", upscaleModel: "4x-UltraSharp.pth", width: 3840, height: 2560, prefix: "strata/t" });
+  applyDefaults(g.prompt, fullLite);
+  assert.deepEqual(validatePrompt(g.prompt, fullLite), []);
+  const types = Object.values(g.prompt).map((n) => n.class_type);
+  assert.ok(types.includes("ImageUpscaleWithModel"));
+  assert.ok(!types.some((t) => /KSampler|VAE|ControlNet|IPAdapter/.test(t)), "no diffusion in the upscale pass");
+  const scale = Object.values(g.prompt).find((n) => n.class_type === "ImageScale")!;
+  assert.equal(scale.inputs.width, 3840);
+  assert.equal(scale.inputs.height, 2560);
+});
+
+test("new Lite projects default to CFG 1 (no negative pass) and 4K on demand", () => {
+  const s = defaultSettings("lite");
+  assert.equal(s.cfg, 1);
+  assert.equal(s.upscale, false);
+  assert.deepEqual(migrateSettings(s), [], "fresh settings need no migration");
+});
+
+test("migration updates only values still at the old defaults", () => {
+  const old = { ...defaultSettings("lite"), cfg: 1.5, upscale: true, settingsVersion: undefined };
+  assert.equal(migrateSettings(old).length, 2);
+  assert.equal(old.cfg, 1);
+  assert.equal(old.upscale, false);
+
+  const tuned = { ...defaultSettings("lite"), cfg: 2.5, upscale: false, settingsVersion: undefined };
+  migrateSettings(tuned);
+  assert.equal(tuned.cfg, 2.5, "a CFG the user chose is kept");
+
+  const studio = { ...defaultSettings("studio"), settingsVersion: undefined };
+  assert.deepEqual(migrateSettings(studio), [], "Studio settings are untouched");
+});
+
+test("planCrop crops a wide floor strip (regression: padding came from the longest side)", () => {
+  // Exact union bbox the UI uploaded for a floor painted across the room.
+  const c = planCrop({ x: 3, y: 331, width: 762, height: 181 }, 768, 512);
+  assert.ok(c, "a floor covering the bottom third must be cropped");
+  assert.equal(c!.height, 384);
+  assert.ok(c!.y <= 331 && c!.y + c!.height >= 512);
+});
+
+test("reference encoding runs as its own job and averages like IPAdapterAdvanced", () => {
+  const g = buildEncodeGraph({ ipadapter: "ip-adapter-plus_sd15.safetensors", clipVision: "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors", items: [{ key: "abc_1", refs: ["strata/r1.png", "strata/r2.png"] }] });
+  applyDefaults(g.prompt, fullLite);
+  assert.deepEqual(validatePrompt(g.prompt, fullLite), []);
+  const types = Object.values(g.prompt).map((n) => n.class_type);
+  assert.ok(!types.some((t) => /Checkpoint|KSampler|ControlNet/.test(t)), "no diffusion models in the encode job");
+  const combine = Object.values(g.prompt).find((n) => n.class_type === "IPAdapterCombineEmbeds")!;
+  assert.equal(combine.inputs.method, "average");
+  assert.deepEqual(g.files.abc_1, { pos: "strata_emb_abc_1_pos_00001.ipadpt", neg: "strata_emb_abc_1_neg_00001.ipadpt" });
+});
+
+test("generation with pre-encoded embeddings never loads CLIP Vision", () => {
+  const req = liteRequest();
+  req.surfaces = req.surfaces.map((x) => (x.refs.length ? { ...x, embeds: { pos: "strata_emb_k_pos_00001.ipadpt", neg: "strata_emb_k_neg_00001.ipadpt" } } : x));
+  const g = buildGenerationGraph(req);
+  applyDefaults(g.prompt, fullLite);
+  assert.deepEqual(validatePrompt(g.prompt, fullLite), []);
+  const types = Object.values(g.prompt).map((n) => n.class_type);
+  assert.ok(!types.includes("CLIPVisionLoader"), "CLIP Vision must not be loaded during diffusion");
+  assert.ok(types.includes("IPAdapterEmbeds") && !types.includes("IPAdapterAdvanced"));
+  const apply = Object.values(g.prompt).find((n) => n.class_type === "IPAdapterEmbeds")!;
+  assert.ok(apply.inputs.attn_mask, "embeddings stay confined to the surface mask");
 });

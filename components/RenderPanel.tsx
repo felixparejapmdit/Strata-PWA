@@ -7,6 +7,7 @@ import { checkpointsForProfile, PROFILES, resolveModels } from "@/lib/workflow/p
 import { comboOptions } from "@/lib/workflow/graph";
 import type { GenSettings, PipelineProfile } from "@/lib/types";
 import { Button, cx, Field, inputClass, NumberInput, Section, Select, Slider, Toggle } from "./ui";
+import { PerfHints } from "./PerfHints";
 
 export function RenderPanel() {
   const s = useStore((st) => st.project!.settings);
@@ -21,6 +22,7 @@ export function RenderPanel() {
 
   return (
     <div>
+      <PerfHints />
       <Section title="Pipeline">
         <div className="grid grid-cols-2 gap-1.5">
           {(Object.keys(PROFILES) as PipelineProfile[]).map((p) => (
@@ -42,7 +44,7 @@ export function RenderPanel() {
         <Field label="Checkpoint">
           <Select value={s.checkpoint} onChange={(v) => set({ checkpoint: v })} options={(ckpts.length ? ckpts : [s.checkpoint]).map((c) => ({ value: c, label: c.replace(/\.safetensors$/, "") }))} />
         </Field>
-        <ModelStatus models={models} useDepth={s.useDepth} useLcm={s.useLcm} />
+        <ModelStatus models={models} useDepth={s.useDepth} useLcm={s.useLcm} online={!!doctor?.online} />
       </Section>
 
       <Section title="Material">
@@ -67,7 +69,7 @@ export function RenderPanel() {
       </Section>
 
       <Section title="Output">
-        <Toggle label="4K upscale" hint={`ESRGAN ${models.upscaleModel ?? "(none installed)"}${s.profile === "studio" && models.hasUltimateUpscale ? " + Ultimate SD Upscale" : ""}`} checked={s.upscale} onChange={(v) => set({ upscale: v })} />
+        <Toggle label="Upscale every render to 4K" hint={`Off: use the 4K button on the render you keep (much faster on CPU). ESRGAN ${models.upscaleModel ?? "(none installed)"}${s.profile === "studio" && models.hasUltimateUpscale ? " + Ultimate SD Upscale" : ""}`} checked={s.upscale} onChange={(v) => set({ upscale: v })} />
         <div className="grid grid-cols-2 gap-2">
           <Field label="Final long side">
             <Select value={String(s.targetLongSide)} onChange={(v) => set({ targetLongSide: Number(v) })} options={[{ value: "2560", label: "2560 px" }, { value: "3840", label: "3840 px (4K UHD)" }, { value: "4096", label: "4096 px (DCI 4K)" }]} />
@@ -132,7 +134,15 @@ export function RenderPanel() {
   );
 }
 
-function ModelStatus({ models, useDepth, useLcm }: { models: ReturnType<typeof resolveModels>; useDepth: boolean; useLcm: boolean }) {
+function ModelStatus({ models, useDepth, useLcm, online }: { models: ReturnType<typeof resolveModels>; useDepth: boolean; useLcm: boolean; online: boolean }) {
+  // Offline, every slot resolves to null; that says nothing about what is installed.
+  if (!online) {
+    return (
+      <button onClick={() => useStore.setState({ modal: "settings" })} className="w-full rounded-lg border border-line px-2.5 py-2 text-left text-xs text-mute hover:bg-paper">
+        <span className="font-medium text-danger">ComfyUI is offline.</span> Model status appears once it is running. <span className="text-accent">Settings</span>
+      </button>
+    );
+  }
   const rows: { label: string; ok: boolean; value: string | null; needed: boolean }[] = [
     { label: "Checkpoint", ok: !!models.checkpoint, value: models.checkpoint, needed: true },
     { label: "LCM LoRA", ok: !!models.lcmLora, value: models.lcmLora, needed: useLcm },
