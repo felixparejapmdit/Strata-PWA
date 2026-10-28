@@ -2,13 +2,20 @@
 
 Structure-locked AI material rendering for architects and interior designers, running on a local ComfyUI. Drop in a room photo or render, drop reference photos onto **Floor / Walls / Ceiling / Furniture**, and Strata re-finishes only those surfaces. Walls, doors, windows and columns stay pixel-identical. It then exports a costed specification proposal (PDF) with Philippine, tropical-rated materials.
 
+## What stays the same
+
+- **Outside the masks:** every pixel is the original (the render is composited back over the base image).
+- **Inside the masks:** only the finish changes. Geometry is held by the **depth lock** (Depth Anything 3 → depth ControlNet: each wall, floor and ceiling stays on its original plane) and the **line lock** (Canny; old surface texture is removed, but the corners *between* surfaces are kept). Reference images are applied with IP-Adapter in **style transfer** mode, which transfers colour and texture but not objects or layout. Material strength defaults to 75% so the original shading anchors the result.
+- **Openings and fixtures:** put windows, doors, beams and lights in the **Protected** layer (or run **Auto-detect**, which finds them). Anything inside a surface mask and not protected can be repainted; Strata warns when walls or ceiling are masked with nothing protected.
+- **Check it:** `npx tsx scripts/structure-check.mts <original> <render>` compares Depth Anything 3 depth maps (1.00 = identical geometry; a moved wall drops well below 0.95).
+
 ## Sample
 
 | Base | Floor only (marble reference) | Floor, walls and ceiling |
 |---|---|---|
 | ![before](docs/samples/before.png) | ![floor](docs/samples/after-floor.png) | ![three surfaces](docs/samples/after-floor-walls-ceiling.png) |
 
-Rendered on a CPU-only i5-7400 with 8 GB RAM (Lite profile, 768 px, 6 LCM steps). Window, mullions, radiator and sofa stay pixel-identical because they are outside the masks. The decor on the left wall of the third image comes from its reference being a furnished-room collage; close-up material photos give clean finishes.
+Rendered on a CPU-only i5-7400 with 8 GB RAM (Lite profile, 768 px, 6 LCM steps). Window, mullions, radiator and sofa stay pixel-identical because they are outside the masks. Every wall, corner and the ceiling stay where they were: `scripts/structure-check.mts` scores the third image 0.998 against the base (left wall 0.999). The small wall sockets on the left were inside the walls mask and got the new finish; paint fixtures like these into **Protected** to keep them.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the pipeline and how it departs from the original blueprint.
 
@@ -70,13 +77,16 @@ Measured on an i5-7400 with 8 GB RAM (`scripts/profile-generate.mts` reproduces 
 | Crop to edited region, CFG 1.0, 4K on demand (new defaults) | 550 s |
 | UI **Generate** with a reference image, fp8 UNet | 493 s cold (+~135 s once per new reference image) |
 | UI **4K** button on a finished render | 95 s |
+| UI **Generate**, floor + walls + ceiling, depth and line locks | 1713 s |
+| UI **Generate**, floor + walls + ceiling, depth lock alone (low-memory default) | 818 s |
 
 What Strata does automatically:
 - **Crops** diffusion to the edited region plus context and pastes it back over the untouched original.
 - **CFG 1.0** with LCM, so ComfyUI skips the negative pass (half the work per step).
 - **4K on demand**: click **4K** on the render you keep; proposal export upscales automatically.
 - **Encodes reference images in a separate small job** and caches the embeddings, so the CLIP Vision encoder is never in memory together with the diffusion models (the point where 8 GB machines crashed).
-- **Unloads ComfyUI's model cache** before each job on CPU; keeping everything resident crashed with out-of-memory.
+- **Unloads ComfyUI's model cache** on CPU when the next job needs different models (Auto-detect, reference encoding, render); keeping everything resident crashed with out-of-memory.
+- **Runs one ControlNet (depth) on CPU / low-memory hosts.** Each fp32 ControlNet costs ~1.4 GB. Depth alone held the geometry just as well (structure check 0.998) and halved a three-surface render.
 
 What you should do:
 - Start ComfyUI with plain **`--cpu`**, no dtype flags. Each global flag breaks something on CPU: `--fp16-unet` breaks IP-Adapter ("mat1 and mat2 must have the same dtype"); `--fp8_e4m3fn-unet` breaks SAM3 Auto-detect ("slow_conv2d_cpu not implemented for Float8_e4m3fn"). Strata detects both and explains before running.

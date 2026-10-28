@@ -298,6 +298,7 @@ export async function generate() {
       prefix: `strata/${tag}`,
       crop,
       fp8Unet: memoryTight(),
+      singleControlNet: memoryTight(),
     });
     applyDefaults(graph.prompt, info);
     const problems = validatePrompt(graph.prompt, info);

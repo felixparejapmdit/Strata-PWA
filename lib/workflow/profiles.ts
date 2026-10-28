@@ -34,7 +34,7 @@ export const USED_NODES = [
   "ImageCompositeMasked", "LoadImage", "LoadImageMask", "LoadDA3Model", "DA3Inference", "DA3Render",
   "IPAdapterModelLoader", "CLIPVisionLoader", "IPAdapterAdvanced", "ImageBatch", "VAEEncode", "SetLatentNoiseMask",
   "KSampler", "VAEDecode", "SaveImage", "UpscaleModelLoader", "ImageUpscaleWithModel", "ImageScale",
-  "UltimateSDUpscale", "MaskToImage", "ImageToMask", "SAM3_Detect", "ImageCrop", "CropMask", "UNETLoader", "CLIPLoader", "VAELoader",
+  "UltimateSDUpscale", "MaskToImage", "ImageToMask", "SAM3_Detect", "ImageCrop", "CropMask", "MaskComposite", "UNETLoader", "CLIPLoader", "VAELoader",
   "IPAdapterEncoder", "IPAdapterCombineEmbeds", "IPAdapterSaveEmbeds", "IPAdapterLoadEmbeds", "IPAdapterEmbeds",
 ];
 
@@ -61,7 +61,8 @@ export const PROFILES: Record<PipelineProfile, ProfileSpec> = {
     lineUnionType: "",
     depthUnionType: "",
     ipadapter: ["ip-adapter-plus_sd15.safetensors", "ip-adapter_sd15.safetensors"],
-    ipaWeightType: "linear",
+    // SD1.5 "style transfer" skips the composition blocks: finish and colour, not objects or layout.
+    ipaWeightType: "style transfer",
     clipVision: ["CLIP-ViT-H-14-laion2B-s32B-b79K.fp16.safetensors", "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"],
     depthModel: ["depth_anything_3_small.safetensors", "depth_anything_3_base.safetensors", "depth_anything_3_mono_large.safetensors"],
     upscaleModels: ["4x-UltraSharp.pth", "RealESRGAN_x4plus.pth"],
@@ -73,10 +74,12 @@ export const PROFILES: Record<PipelineProfile, ProfileSpec> = {
       sampler: "lcm",
       scheduler: "sgm_uniform",
       useLcm: true,
-      denoise: 0.9,
+      // Lower than full repaint so the original shading and geometry anchor the new finish.
+      denoise: 0.75,
       lineStrength: 0.85,
-      useDepth: false,
-      depthStrength: 0.55,
+      // On by default: in soft-lit rooms the depth map, not edges, is what defines wall planes.
+      useDepth: true,
+      depthStrength: 0.75,
       // 4K on demand (filmstrip / proposal export): iterating at 768 px is far faster on CPU.
       upscale: false,
       targetLongSide: 3840,
@@ -108,10 +111,10 @@ export const PROFILES: Record<PipelineProfile, ProfileSpec> = {
       sampler: "dpmpp_2m",
       scheduler: "karras",
       useLcm: false,
-      denoise: 0.92,
+      denoise: 0.8,
       lineStrength: 0.7,
       useDepth: true,
-      depthStrength: 0.5,
+      depthStrength: 0.7,
       upscale: true,
       targetLongSide: 3840,
       workLongSide: 1344,
@@ -122,7 +125,7 @@ export const PROFILES: Record<PipelineProfile, ProfileSpec> = {
 };
 
 /** Bumped when defaults change in a way saved projects should pick up; see migrateSettings(). */
-export const SETTINGS_VERSION = 2;
+export const SETTINGS_VERSION = 3;
 
 export function defaultSettings(profile: PipelineProfile, checkpoint = ""): GenSettings {
   return {
@@ -168,6 +171,18 @@ export function migrateSettings(s: GenSettings): string[] {
     if (s.upscale) {
       s.upscale = false;
       changed.push("4K on demand instead of every render");
+    }
+  }
+  if ((s.settingsVersion ?? 1) < 3 && s.profile === "lite") {
+    // Repainting walls/ceiling without the depth lock let the model move room corners.
+    if (!s.useDepth) {
+      s.useDepth = true;
+      s.depthStrength = Math.max(s.depthStrength, 0.75);
+      changed.push("depth lock on (keeps walls, floor and ceiling on their original planes)");
+    }
+    if (s.denoise === 0.9) {
+      s.denoise = 0.75;
+      changed.push("material strength 75% (original geometry and shading anchor the finish)");
     }
   }
   s.settingsVersion = SETTINGS_VERSION;

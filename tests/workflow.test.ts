@@ -98,15 +98,29 @@ test("structure lock composites the render over the untouched base with the soft
   assert.deepEqual(g.prompt[g.previewNode].inputs.images, [lockId, 0]);
 });
 
-test("line lock blanks old texture inside the editable area", () => {
+test("line lock blanks texture per surface, keeping the corners between surfaces", () => {
   const g = buildGenerationGraph(liteRequest());
   const entries = Object.entries(g.prompt);
+  const byId = Object.fromEntries(entries);
   const [cannyId] = entries.find(([, n]) => n.class_type === "Canny")!;
-  const blank = entries.find(([, n]) => n.class_type === "ImageCompositeMasked" && JSON.stringify(n.inputs.destination) === JSON.stringify([cannyId, 0]));
+  const blank = entries.find(([, n]) => n.class_type === "ImageCompositeMasked" && JSON.stringify(n.inputs.destination) === JSON.stringify([cannyId, 0]))!;
   assert.ok(blank, "canny output must be masked before reaching the ControlNet");
-  const [, grow] = entries.find(([id]) => JSON.stringify(blank![1].inputs.mask) === JSON.stringify([id, 0]))!;
-  assert.equal(grow.class_type, "GrowMask");
-  assert.ok((grow.inputs.expand as number) < 0, "mask must be eroded so boundary lines survive");
+  // Two surfaces → their eroded masks are added together; the grown union is not used.
+  const combine = byId[(blank[1].inputs.mask as [string, number])[0]];
+  assert.equal(combine.class_type, "MaskComposite");
+  const erosions = entries.filter(([, n]) => n.class_type === "GrowMask" && (n.inputs.expand as number) < 0);
+  assert.equal(erosions.length, 2, "one erosion per surface");
+  const sources = erosions.map(([, n]) => byId[(n.inputs.mask as [string, number])[0]]._meta?.title);
+  assert.deepEqual(sources.sort(), ["floor mask", "walls mask"], "each erosion starts from a single surface mask");
+});
+
+test("depth lock is on by default and holds through the last step", () => {
+  const g = buildGenerationGraph(liteRequest());
+  const depthApply = Object.values(g.prompt).filter((n) => n.class_type === "ControlNetApplyAdvanced").at(-1)!;
+  assert.equal(depthApply.inputs.end_percent, 1);
+  assert.ok(Object.values(g.prompt).some((n) => n.class_type === "DA3Inference"));
+  const ipa = Object.values(g.prompt).find((n) => n.class_type === "IPAdapterAdvanced")!;
+  assert.equal(ipa.inputs.weight_type, "style transfer", "references transfer finish, not objects");
 });
 
 test("missing optional models degrade with warnings instead of failing", () => {
@@ -288,4 +302,23 @@ test("low-memory renders store only the UNet in fp8 (per model, not a global fla
   assert.ok(types.includes("CLIPLoader") && types.includes("VAELoader") && types.includes("LoraLoader"));
   // Without the flag (or without the parts) the full checkpoint is used as before.
   assert.ok(Object.values(buildGenerationGraph({ ...req, fp8Unet: false }).prompt).some((n) => n.class_type === "CheckpointLoaderSimple"));
+});
+
+test("low-memory hosts run the depth lock alone instead of two ControlNets", () => {
+  const withDepth = withModels({
+    "ControlNetLoader.control_net_name": ["control_v11f1p_sd15_depth_fp16.safetensors"],
+    "LoadDA3Model.model_name": ["depth_anything_3_small.safetensors"],
+    "IPAdapterModelLoader.ipadapter_file": ["ip-adapter-plus_sd15.safetensors"],
+  });
+  const base = liteRequest({}, withDepth);
+  const count = (g: ReturnType<typeof buildGenerationGraph>, t: string) => Object.values(g.prompt).filter((n) => n.class_type === t).length;
+  const both = buildGenerationGraph(base);
+  assert.equal(count(both, "ControlNetApplyAdvanced"), 2);
+  const single = buildGenerationGraph({ ...base, singleControlNet: true });
+  assert.equal(count(single, "ControlNetApplyAdvanced"), 1);
+  assert.equal(count(single, "Canny"), 0);
+  assert.equal(count(single, "DA3Inference"), 1, "the depth lock is the one kept");
+  // Without depth available, the line lock stays even on low-memory hosts.
+  const noDepth = buildGenerationGraph({ ...liteRequest({ useDepth: false }, withDepth), singleControlNet: true });
+  assert.equal(count(noDepth, "Canny"), 1);
 });

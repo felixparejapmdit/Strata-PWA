@@ -143,13 +143,14 @@ export const MODEL_CATALOG: CatalogModel[] = [
   {
     id: "cn-depth-sd15",
     name: "ControlNet Depth (SD1.5): perspective lock",
+    note: "Keeps repainted walls, floor and ceiling on their original planes. Soft-lit rooms have few edges at the corners, so this is what holds the geometry.",
     role: "controlnet",
     dir: "controlnet",
     filename: "control_v11f1p_sd15_depth_fp16.safetensors",
     url: "https://huggingface.co/comfyanonymous/ControlNet-v1-1_fp16_safetensors/resolve/main/control_v11f1p_sd15_depth_fp16.safetensors",
     bytes: 722601100,
     profiles: ["lite"],
-    required: false,
+    required: true,
   },
   {
     id: "ipa-plus-sd15",
@@ -172,7 +173,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     url: "https://huggingface.co/Comfy-Org/Depth-Anything-3/resolve/main/geometry_estimation/depth_anything_3_small.safetensors",
     bytes: 137254980,
     profiles: ["lite"],
-    required: false,
+    required: true,
   },
   // Studio (NVIDIA ≥12 GB VRAM): the blueprint's SDXL stack
   {

@@ -15,6 +15,29 @@ export interface MockOptions {
   ramFreeGb?: number;
   /** History reads that return nothing after a prompt is announced done (ComfyUI's real race). */
   historyLag?: number;
+  /** Extra model files, keyed "Node.input" (the fixture only has what an early install had). */
+  installed?: Record<string, string[]>;
+}
+
+/** A complete Lite install, as Model Manager leaves it (depth lock, IP-Adapter Plus, split UNet). */
+export const FULL_LITE = {
+  "ControlNetLoader.control_net_name": ["control_v11f1p_sd15_depth_fp16.safetensors"],
+  "LoadDA3Model.model_name": ["depth_anything_3_small.safetensors"],
+  "IPAdapterModelLoader.ipadapter_file": ["ip-adapter-plus_sd15.safetensors"],
+  "UpscaleModelLoader.model_name": ["4x-UltraSharp.pth"],
+  "UNETLoader.unet_name": ["Realistic_Vision_V5.1_unet.safetensors"],
+  "CLIPLoader.clip_name": ["Realistic_Vision_V5.1_clip_l.safetensors"],
+};
+
+function withModels(extra: Record<string, string[]>) {
+  const copy = structuredClone(OBJECT_INFO);
+  for (const [key, files] of Object.entries(extra)) {
+    const [cls, input] = key.split(".");
+    const spec = copy[cls].input.required[input];
+    if (Array.isArray(spec[0])) spec[0].push(...files);
+    else spec[1].options.push(...files);
+  }
+  return copy;
 }
 
 /**
@@ -27,6 +50,7 @@ export async function mockComfy(page: Page, opts: MockOptions = {}) {
   const promoted = new Set<string>();
   const frees: unknown[] = [];
   const lag = new Map<string, number>();
+  const objectInfo = opts.installed ? withModels(opts.installed) : OBJECT_INFO;
   const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
   await page.route("**/api/doctor**", (route) =>
@@ -40,10 +64,10 @@ export async function mockComfy(page: Page, opts: MockOptions = {}) {
           device: { name: "cpu", type: "cpu", vramTotal: 8e9, vramFree: 4e9 },
           ramTotal: 8e9,
           ramFree: (opts.ramFreeGb ?? 4) * 1024 ** 3,
-          argv: opts.argv ?? ["main.py", "--listen", "127.0.0.1", "--cpu", "--fp8_e4m3fn-unet"],
+          argv: opts.argv ?? ["main.py", "--listen", "127.0.0.1", "--cpu"],
           recommendedProfile: "lite",
-          infoKey: "fixture",
-          objectInfo: OBJECT_INFO,
+          infoKey: opts.installed ? "fixture-full" : "fixture",
+          objectInfo,
         }),
   );
   // Like ComfyUI, announce "executing: null" (done) *before* the history entry exists; the

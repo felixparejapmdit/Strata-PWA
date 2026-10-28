@@ -1,6 +1,6 @@
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import { classTypes, FIXTURES, mockComfy } from "./mock-comfy";
+import { classTypes, FIXTURES, FULL_LITE, mockComfy } from "./mock-comfy";
 
 const inspector = (page: Page) => page.locator("aside").last();
 // Match the card's exact title: "ceiling" also appears inside other cards' material dropdowns.
@@ -150,12 +150,17 @@ test.describe("Strata", () => {
   });
 
   test("Generate on floor, walls and ceiling, then compare, 4K and PDF export", async ({ page }) => {
-    const comfy = await mockComfy(page);
+    const comfy = await mockComfy(page, { installed: FULL_LITE });
     await page.goto("/");
     await uploadBase(page);
     await paint(page, "1", [[0.78, 0.25, 0.6], [0.9, 0.05, 0.6]]);
     await paint(page, "2", [[0.4, 0.27, 0.32], [0.45, 0.9, 0.97]]);
     await paint(page, "3", [[0.06, 0.2, 0.8], [0.14, 0.3, 0.7]]);
+    // Walls and ceiling masked with nothing protected: the window would be repainted too.
+    const exposed = inspector(page).getByRole("note").filter({ hasText: "nothing is protected" });
+    await expect(exposed).toBeVisible();
+    await paint(page, "0", [[0.45, 0.4, 0.6]]);
+    await expect(exposed).toHaveCount(0);
     await addReference(page, "Floor", "marble.png");
     await addReference(page, "Walls", "oak.png");
     await card(page, "Ceiling").locator("select").selectOption("aluminium-linear-ceiling");
@@ -178,7 +183,17 @@ test.describe("Strata", () => {
     expect(regional).toHaveLength(3);
     const sampler = Object.values(render).find((n) => n.class_type === "KSampler")!;
     expect(sampler.inputs.cfg).toBe(1);
+    expect(sampler.inputs.denoise).toBe(0.75);
     expect(classTypes(render)).not.toContain("ImageUpscaleWithModel");
+    // Geometry: on this CPU host the depth lock runs alone (no Canny) on an fp8 UNet, and the
+    // references transfer finish only ("style transfer"), never objects or layout.
+    expect(classTypes(render)).toContain("DA3Inference");
+    expect(classTypes(render)).not.toContain("Canny");
+    expect(classTypes(render).filter((t) => t === "ControlNetApplyAdvanced")).toHaveLength(1);
+    const depthLock = Object.values(render).find((n) => n.class_type === "ControlNetApplyAdvanced")!;
+    expect(depthLock.inputs.end_percent).toBe(1);
+    expect(Object.values(render).find((n) => n.class_type === "UNETLoader")?.inputs.weight_dtype).toBe("fp8_e4m3fn");
+    for (const n of Object.values(render).filter((n) => n.class_type === "IPAdapterEmbeds")) expect(n.inputs.weight_type).toBe("style transfer");
 
     // 4K on demand
     await page.getByRole("button", { name: /^4K$/ }).click();

@@ -40,6 +40,12 @@ export interface GenerationRequest {
    * --fp8_e4m3fn-unet flag breaks SAM3; --fp16-unet breaks IP-Adapter).
    */
   fp8Unet?: boolean;
+  /**
+   * Low-memory host: run only one ControlNet. With the depth lock on, the line lock is skipped:
+   * each fp32 ControlNet costs ~1.4 GB, and depth is what holds the geometry (measured with
+   * scripts/structure-check.mts); outside the masks the composite keeps the original anyway.
+   */
+  singleControlNet?: boolean;
 }
 
 export interface GenerationGraph {
@@ -124,11 +130,18 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
   let negative: Link = Graph.out(g.add("CLIPTextEncode", { text: s.negativePrompt, clip }, "Negative prompt"), 0);
   const plainNegative = negative;
 
-  // Line lock: Canny edges with the old surface texture blanked out (eroded mask keeps boundary lines)
-  if (m.lineControlNet && s.lineStrength > 0) {
+  // Line lock: Canny edges with the old surface *texture* blanked out. Each surface is eroded on
+  // its own, so the lines *between* surfaces (wall/ceiling/floor corners) survive even when every
+  // surface is repainted; eroding the union instead blanked the room's corners.
+  const depthAvailable = s.useDepth && !!m.depthControlNet && !!m.depthModel && m.hasDepthAnything;
+  const skipLines = !!req.singleControlNet && depthAvailable;
+  if (m.lineControlNet && s.lineStrength > 0 && !skipLines) {
     const canny = g.add("Canny", { image: work, low_threshold: 0.2, high_threshold: 0.45 }, "Structure lines");
     stages[canny] = "Analysing structure";
-    const eroded = g.add("GrowMask", { mask: workHard, expand: -8, tapered_corners: true });
+    const interiors = req.surfaces.map((surf) => Graph.out(g.add("GrowMask", { mask: surfaceMasks[surf.bucket], expand: -10, tapered_corners: true }), 0));
+    const eroded = interiors.length
+      ? interiors.slice(1).reduce<Link>((acc, mask) => Graph.out(g.add("MaskComposite", { destination: acc, source: mask, x: 0, y: 0, operation: "add" }), 0), interiors[0])
+      : Graph.out(g.add("GrowMask", { mask: workHard, expand: -8, tapered_corners: true }), 0);
     const black = g.add("EmptyImage", { width: area.width, height: area.height, batch_size: 1, color: 0 });
     const lines = g.add("ImageCompositeMasked", {
       destination: Graph.out(canny, 0),
@@ -136,7 +149,7 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
       x: 0,
       y: 0,
       resize_source: false,
-      mask: Graph.out(eroded, 0),
+      mask: eroded,
     });
     let cn: Link = Graph.out(g.add("ControlNetLoader", { control_net_name: m.lineControlNet }, "Line ControlNet"), 0);
     if (spec.union) cn = Graph.out(g.add("SetUnionControlNetType", { control_net: cn, type: spec.lineUnionType }), 0);
@@ -151,11 +164,12 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
     });
     positive = Graph.out(applied, 0);
     negative = Graph.out(applied, 1);
-  } else if (s.lineStrength > 0) {
+  } else if (s.lineStrength > 0 && !skipLines) {
     warnings.push("Line ControlNet not installed: structure is protected by masking only.");
   }
 
-  // Depth lock: keeps the new material on the same perspective planes
+  // Depth lock: keeps every repainted surface on its original perspective plane. Soft-lit rooms
+  // have almost no edges at their corners, so this (not the line lock) is what holds the geometry.
   if (s.useDepth) {
     if (m.depthControlNet && m.depthModel && m.hasDepthAnything) {
       const da3 = g.add("LoadDA3Model", { model_name: m.depthModel, weight_dtype: "default" }, "Depth Anything 3");
@@ -171,7 +185,7 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
         image: Graph.out(depth, 0),
         strength: s.depthStrength,
         start_percent: 0,
-        end_percent: 0.8,
+        end_percent: 1,
       });
       positive = Graph.out(applied, 0);
       negative = Graph.out(applied, 1);

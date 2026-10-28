@@ -217,20 +217,33 @@ function BucketCard({ bucket }: { bucket: BucketId }) {
 function ProtectedCard() {
   const mask = useStore((s) => s.project!.masks.protected);
   const active = useStore((s) => s.layer === "protected");
+  // Walls or ceiling masked with nothing protected: windows, doors and beams inside those masks
+  // would be repainted along with the surface.
+  const exposed = useStore((s) => {
+    const p = s.project!;
+    return mask.coverage === 0 && (["walls", "ceiling"] as const).some((b) => p.buckets[b].enabled && p.masks[b].coverage > 0.001);
+  });
   return (
-    <button
-      onClick={() => useStore.setState({ layer: "protected", view: "edit", tool: "brush" })}
-      className={cx("flex w-full items-start gap-2.5 rounded-lg border p-3 text-left transition hover:bg-paper", active ? "border-red-200 bg-red-50/40" : "border-line")}
-    >
-      <ShieldCheck size={16} className="mt-0.5 shrink-0 text-danger" />
-      <span className="flex-1">
-        <span className="flex items-center gap-2 text-[13px] font-semibold">
-          Protected structure
-          <span className="rounded bg-paper px-1.5 py-px text-[10px] font-medium tabular-nums text-mute">{(mask.coverage * 100).toFixed(1)}%</span>
+    <div className="space-y-2">
+      <button
+        onClick={() => useStore.setState({ layer: "protected", view: "edit", tool: "brush" })}
+        className={cx("flex w-full items-start gap-2.5 rounded-lg border p-3 text-left transition hover:bg-paper", active ? "border-red-200 bg-red-50/40" : "border-line")}
+      >
+        <ShieldCheck size={16} className="mt-0.5 shrink-0 text-danger" />
+        <span className="flex-1">
+          <span className="flex items-center gap-2 text-[13px] font-semibold">
+            Protected structure
+            <span className="rounded bg-paper px-1.5 py-px text-[10px] font-medium tabular-nums text-mute">{(mask.coverage * 100).toFixed(1)}%</span>
+          </span>
+          <span className="mt-0.5 block text-[11px] leading-snug text-mute">Doors, windows, mullions, columns, beams and fixtures. Subtracted from every surface, so they are never repainted.</span>
         </span>
-        <span className="mt-0.5 block text-[11px] leading-snug text-mute">Doors, windows, mullions, columns and beams. Subtracted from every surface, so they are never repainted.</span>
-      </span>
-    </button>
+      </button>
+      {exposed && (
+        <p role="note" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-snug text-amber-900">
+          Walls or ceiling are masked but nothing is protected, so any window, door, beam or light inside those masks will be repainted too. Run <b>Auto-detect</b> or paint them with the <b>Protected</b> layer (key 0).
+        </p>
+      )}
+    </div>
   );
 }
 
