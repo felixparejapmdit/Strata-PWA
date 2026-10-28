@@ -2,6 +2,14 @@
 
 Structure-locked AI material rendering for architects and interior designers, running on a local ComfyUI. Drop in a room photo or render, drop reference photos onto **Floor / Walls / Ceiling / Furniture**, and Strata re-finishes only those surfaces. Walls, doors, windows and columns stay pixel-identical. It then exports a costed specification proposal (PDF) with Philippine, tropical-rated materials.
 
+## Sample
+
+| Base | Floor only (marble reference) | Floor, walls and ceiling |
+|---|---|---|
+| ![before](docs/samples/before.png) | ![floor](docs/samples/after-floor.png) | ![three surfaces](docs/samples/after-floor-walls-ceiling.png) |
+
+Rendered on a CPU-only i5-7400 with 8 GB RAM (Lite profile, 768 px, 6 LCM steps). Window, mullions, radiator and sofa stay pixel-identical because they are outside the masks. The decor on the left wall of the third image comes from its reference being a furnished-room collage; close-up material photos give clean finishes.
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the pipeline and how it departs from the original blueprint.
 
 ## Requirements
@@ -15,9 +23,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the pipeline and how it dep
 
 ```bash
 # 1. Start ComfyUI. No CORS flags needed.
-#    Without an NVIDIA GPU use --cpu --fp8_e4m3fn-unet (see "Performance"). Not --fp16-unet.
+#    Without an NVIDIA GPU use plain --cpu (no dtype flags; see "Performance").
 cd D:\PROJECTS\ComfyUI
-.venv\Scripts\python.exe main.py --listen 127.0.0.1 --cpu --fp8_e4m3fn-unet
+.venv\Scripts\python.exe main.py --listen 127.0.0.1 --cpu
 
 # 2. Start Strata
 cd "D:\PROJECTS\Strata PWA"
@@ -60,7 +68,7 @@ Measured on an i5-7400 with 8 GB RAM (`scripts/profile-generate.mts` reproduces 
 |---|---|
 | Full frame, CFG 1.5, 4K every render (old defaults) | 911 s |
 | Crop to edited region, CFG 1.0, 4K on demand (new defaults) | 550 s |
-| UI **Generate** with a reference image, `--fp8_e4m3fn-unet` | 536 s (+142 s once to encode a new reference) |
+| UI **Generate** with a reference image, fp8 UNet | 493 s cold (+~135 s once per new reference image) |
 | UI **4K** button on a finished render | 95 s |
 
 What Strata does automatically:
@@ -71,17 +79,22 @@ What Strata does automatically:
 - **Unloads ComfyUI's model cache** before each job on CPU; keeping everything resident crashed with out-of-memory.
 
 What you should do:
-- Start ComfyUI with **`--cpu --fp8_e4m3fn-unet`**. Diffusion and ControlNet weights are stored in fp8 (a quarter of fp32) and computed in fp32. This was the only configuration that rendered with reference images without crashing on an 8 GB machine with other apps open (6 steps at ~32 s/step, about 9 minutes end to end).
-- **Don't** use `--fp16-unet` on CPU. It halves model memory, but IP-Adapter Plus then mixes fp16 and fp32 in attention and every render with reference images fails ("mat1 and mat2 must have the same dtype"). Strata detects the flag and warns before rendering.
-- In **Model manager**, click **Convert** on *CLIP ViT-H/14 (fp16, low-memory)*. The fp16 copy is identical to what ComfyUI already uses in memory.
+- Start ComfyUI with plain **`--cpu`**, no dtype flags. Each global flag breaks something on CPU: `--fp16-unet` breaks IP-Adapter ("mat1 and mat2 must have the same dtype"); `--fp8_e4m3fn-unet` breaks SAM3 Auto-detect ("slow_conv2d_cpu not implemented for Float8_e4m3fn"). Strata detects both and explains before running.
+- In **Model manager**, click **Convert** on *Realistic Vision 5.1 UNet* and *text encoder*. Strata then loads only the render UNet with fp8 weight storage (a quarter of fp32, still computed in fp32), per model, so SAM3 and IP-Adapter keep full precision. Without this, the full fp32 checkpoint ran an 8 GB machine out of memory.
+- Also **Convert** *CLIP ViT-H/14 (fp16, low-memory)*. The fp16 copy is identical to what ComfyUI already uses in memory, minus a ~3.8 GB loading spike.
+- Iterate in the **Draft** quality preset (512 px, 4 steps); render the keeper in **Standard**. Back-to-back renders keep the models loaded, so only the first render after starting ComfyUI or after Auto-detect pays the model-loading cost.
 - **Close heavy apps** (editors, extra browser tabs, a second ComfyUI) before rendering. With under ~1.5 GB of RAM free, Windows swaps model weights to disk on every step; the Render tab warns you.
 - Keep **free space on C:** (or move the pagefile to another drive). A full C: stops the pagefile from growing, and ComfyUI then crashes with `os error 1455`.
 
 ## Tests
 
 ```bash
-npm test        # graph builders vs. a captured ComfyUI 0.42 schema, BOQ, material rules, texture classifier, proposal HTML
+npm test          # graph builders vs. a captured ComfyUI 0.42 schema, BOQ, material rules, texture classifier, proposal HTML
+npm run test:e2e  # Playwright, installed Chrome: every page and button, Generate/4K/PDF with ComfyUI mocked (~1 min)
 npm run typecheck
+
+# Per-node timing of the real generation graph against a running ComfyUI:
+npx tsx scripts/profile-generate.mts --project <id> --surfaces floor --crop
 ```
 
 ## Material data

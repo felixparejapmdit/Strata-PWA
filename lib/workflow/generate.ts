@@ -34,6 +34,12 @@ export interface GenerationRequest {
   prefix: string;
   /** Diffuse only this region (work px, 8-aligned) and paste it back; see planCrop(). */
   crop?: Rect | null;
+  /**
+   * Low-memory host: load the split UNet with fp8 weight storage (fp32 compute on CPU) instead of
+   * the full checkpoint. Per-model, so SAM3 and IP-Adapter are unaffected (a global
+   * --fp8_e4m3fn-unet flag breaks SAM3; --fp16-unet breaks IP-Adapter).
+   */
+  fp8Unet?: boolean;
 }
 
 export interface GenerationGraph {
@@ -63,11 +69,22 @@ export function buildGenerationGraph(req: GenerationRequest): GenerationGraph {
   if (!m.checkpoint) throw new Error("No checkpoint available for this profile. Download one in Model Manager.");
 
   // Models
-  const ckpt = g.add("CheckpointLoaderSimple", { ckpt_name: m.checkpoint }, "Checkpoint");
-  stages[ckpt] = "Loading checkpoint";
-  let model: Link = Graph.out(ckpt, 0);
-  let clip: Link = Graph.out(ckpt, 1);
-  const vae: Link = Graph.out(ckpt, 2);
+  let model: Link;
+  let clip: Link;
+  let vae: Link;
+  if (req.fp8Unet && m.split) {
+    const unet = g.add("UNETLoader", { unet_name: m.split.unet, weight_dtype: "fp8_e4m3fn" }, "UNet (fp8)");
+    stages[unet] = "Loading model";
+    model = Graph.out(unet, 0);
+    clip = Graph.out(g.add("CLIPLoader", { clip_name: m.split.clip, type: "stable_diffusion" }, "Text encoder"), 0);
+    vae = Graph.out(g.add("VAELoader", { vae_name: m.split.vae }, "VAE"), 0);
+  } else {
+    const ckpt = g.add("CheckpointLoaderSimple", { ckpt_name: m.checkpoint }, "Checkpoint");
+    stages[ckpt] = "Loading checkpoint";
+    model = Graph.out(ckpt, 0);
+    clip = Graph.out(ckpt, 1);
+    vae = Graph.out(ckpt, 2);
+  }
   if (s.useLcm) {
     if (m.lcmLora) {
       const lora = g.add("LoraLoader", { model, clip, lora_name: m.lcmLora, strength_model: 1, strength_clip: 1 }, "LCM LoRA");

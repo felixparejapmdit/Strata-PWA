@@ -5,7 +5,7 @@ import type { BucketId, BucketState, LayerId, PipelineProfile, Project, ProjectS
 import { BUCKETS, LAYERS } from "./buckets";
 import { MATERIALS, suggestMaterial, type Material } from "./materials";
 import * as db from "./db";
-import { masks } from "./masks";
+import { liveCoverage, masks } from "./masks";
 import { analyzeTexture } from "./texture";
 import { bitmapFromBlob, fitWithin, pixelsOf, resizeBlob } from "./image";
 import { checkpointsForProfile, defaultSettings, migrateSettings, PROFILES } from "./workflow/profiles";
@@ -272,13 +272,27 @@ export async function addReferences(bucket: BucketId, files: File[]) {
   const images = files.filter((f) => f.type.startsWith("image/"));
   if (!images.length) return;
   const refs: ReferenceImage[] = [];
+  // References saved before signatures existed fall back to their file name.
+  const existing = new Set((get().project?.buckets[bucket].refs ?? []).map((r) => r.sig ?? `name:${r.name}`));
+  let duplicates = 0;
   for (const f of images.slice(0, 4)) {
+    // The same image twice would only skew the averaged IP-Adapter embedding.
+    const sig = [...new Uint8Array(await crypto.subtle.digest("SHA-1", await f.arrayBuffer()))].map((x) => x.toString(16).padStart(2, "0")).join("");
+    if (existing.has(sig) || existing.has(`name:${f.name}`)) {
+      duplicates++;
+      continue;
+    }
+    existing.add(sig);
     const bmp = await bitmapFromBlob(f);
     const dims = fitWithin(bmp.width, bmp.height, 1024);
     const stored = await resizeBlob(bmp, dims.width, dims.height, "image/jpeg", 0.92);
     const analysis = analyzeTexture(pixelsOf(bmp, 160));
     bmp.close();
-    refs.push({ id: db.uid("r_"), blobId: await db.putBlob(stored), name: f.name, analysis });
+    refs.push({ id: db.uid("r_"), blobId: await db.putBlob(stored), name: f.name, analysis, sig });
+  }
+  if (!refs.length) {
+    toast(`That image is already a ${bucket} reference.`, "info");
+    return;
   }
   patchProject((d) => {
     const b = d.buckets[bucket];
@@ -288,7 +302,7 @@ export async function addReferences(bucket: BucketId, files: File[]) {
   });
   const p = get().project!;
   const m = get().library.find((x) => x.id === p.buckets[bucket].materialId);
-  toast(`${refs.length} reference${refs.length > 1 ? "s" : ""} added to ${bucket}${m ? ` → ${m.name}` : ""}`, "success");
+  toast(`${refs.length} reference${refs.length > 1 ? "s" : ""} added to ${bucket}${m ? ` → ${m.name}` : ""}${duplicates ? ` (${duplicates} duplicate skipped)` : ""}`, "success");
 }
 
 export async function removeReference(bucket: BucketId, refId: string) {
@@ -333,18 +347,27 @@ export function setProfile(profile: PipelineProfile) {
 
 let maskSaveTimer: ReturnType<typeof setTimeout> | null = null;
 const dirtyLayers = new Set<LayerId>();
+const editedLayers = new Set<LayerId>();
 
 /** Marks layers as edited: re-renders overlays now, persists shortly after. */
-export function masksChanged(layers: LayerId[], source: "auto" | "manual" = "manual") {
+export function masksChanged(layers: LayerId[], source: "auto" | "manual" = "manual", edited: LayerId[] = layers) {
   layers.forEach((l) => dirtyLayers.add(l));
+  edited.forEach((l) => editedLayers.add(l));
   set({ maskVersion: get().maskVersion + 1 });
+  // Show the new coverage (chips, Generate button) now; encoding PNGs can take seconds on slow machines.
+  const cov = liveCoverage(layers);
+  patchProject((d) => {
+    for (const l of layers) d.masks[l] = { ...d.masks[l], coverage: cov[l] ?? 0, source: (cov[l] ?? 0) > 0 ? (d.masks[l].source ?? source) : null };
+  });
   if (maskSaveTimer) clearTimeout(maskSaveTimer);
   maskSaveTimer = setTimeout(async () => {
     const p = get().project;
     if (!p) return;
     const layersToSave = [...dirtyLayers];
+    const edits = [...editedLayers];
+    editedLayers.clear();
     dirtyLayers.clear();
-    const next = await masks.persist(layersToSave, p.masks);
+    const next = await masks.persist(layersToSave, p.masks, edits);
     patchProject((d) => {
       for (const l of layersToSave) d.masks[l] = { ...next[l], source: next[l].coverage > 0 ? source : null };
     });

@@ -38,20 +38,26 @@ export function Workspace() {
     const over = (e: DragEvent) => {
       if (hasFiles(e)) e.preventDefault();
     };
-    const drop = (e: DragEvent) => {
-      e.preventDefault();
+    const end = () => {
       depth = 0;
       useStore.setState({ dragging: false });
     };
+    // Bubble phase: swallow drops outside drop zones so the browser doesn't open the file.
+    const drop = (e: DragEvent) => e.preventDefault();
     window.addEventListener("dragenter", enter);
     window.addEventListener("dragleave", leave);
     window.addEventListener("dragover", over);
     window.addEventListener("drop", drop);
+    // Capture phase: drop zones stopPropagation(), so clearing the dimmed state must not rely on bubbling.
+    window.addEventListener("drop", end, true);
+    window.addEventListener("dragend", end, true);
     return () => {
       window.removeEventListener("dragenter", enter);
       window.removeEventListener("dragleave", leave);
       window.removeEventListener("dragover", over);
       window.removeEventListener("drop", drop);
+      window.removeEventListener("drop", end, true);
+      window.removeEventListener("dragend", end, true);
     };
   }, []);
 

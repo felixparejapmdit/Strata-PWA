@@ -7,7 +7,7 @@ import { computeBoq } from "./boq";
 import { buildGuidelines } from "./guidelines";
 import type { ProposalPayload, ScheduleItem } from "./proposal";
 import { globalPrompt, surfacePrompt } from "./prompting";
-import { getBlob, kvGet, kvSet, putBlob, uid } from "./db";
+import { getBlob, putBlob, uid } from "./db";
 import { masks } from "./masks";
 import { comfy, CancelledError } from "./comfy-client";
 import { bitmapFromBlob, canvas, ctx2d, fitWithin, maskBBox, maskFromBwBlob, maskToBwBlob, newMask, resizeBlob, squareCropBlob, toBlob, unionInto } from "./image";
@@ -16,7 +16,7 @@ import { applyDefaults, validatePrompt } from "./workflow/graph";
 import { buildSegmentationGraph } from "./workflow/segment";
 import { buildGenerationGraph, type SurfaceInput } from "./workflow/generate";
 import { buildUpscaleGraph } from "./workflow/upscale";
-import { buildEncodeGraph, EMBED_NODES, type EmbedFiles, type EncodeItem } from "./workflow/embeds";
+import { buildEncodeGraph, EMBED_NODES, embedFiles, embedPrefixes, type EncodeItem } from "./workflow/embeds";
 import { fitDims, resolveModels } from "./workflow/profiles";
 import { masksChanged, patchProject, toast, useStore, type JobState } from "./store";
 
@@ -55,6 +55,14 @@ export function ipAdapterDtypeConflict(): boolean {
   return d?.device?.type === "cpu" && (d.argv ?? []).some((a) => /^--(fp16|bf16)-unet$/.test(a));
 }
 
+/**
+ * A global --fp8_*-unet flag makes ComfyUI store every diffusion-type model in fp8, including SAM3,
+ * which then fails on CPU ("slow_conv2d_cpu not implemented for Float8_e4m3fn").
+ */
+export function globalFp8Flag(): boolean {
+  return (get().doctor?.argv ?? []).some((a) => /^--fp8_e(4m3fn|5m2)-unet$/.test(a));
+}
+
 /** True on hosts where ComfyUI's model cache can overflow memory (CPU inference, or little RAM/VRAM). */
 function memoryTight(): boolean {
   const d = get().doctor;
@@ -63,13 +71,21 @@ function memoryTight(): boolean {
   return d.device?.type === "cpu" || (d.ramFree ?? Infinity) < 3 * GB || (d.device?.type === "cuda" && d.device.vramTotal < 8 * GB);
 }
 
+type ModelSet = "segment" | "encode" | "render";
+/** Which job kind's models ComfyUI holds right now, as far as Strata knows (null = unknown). */
+let residentModels: ModelSet | null = null;
+
 /**
- * ComfyUI keeps every model it has loaded (checkpoint, ControlNets, CLIP Vision, SAM3) cached.
- * On an 8 GB CPU machine that overflows RAM and the next job thrashes swap for hours, so ask
- * ComfyUI to evict its cache before queueing. The flag is honoured before the next prompt runs.
+ * ComfyUI keeps every model it has loaded cached. On a CPU / low-memory host, different job kinds
+ * together (SAM3 + CLIP Vision + diffusion models) overflow RAM and the job thrashes or crashes,
+ * so the cache is evicted when the kind changes. Consecutive jobs of the same kind keep it: on CPU,
+ * reloading and re-patching the checkpoint costs minutes per render. The flag is honoured before
+ * the next prompt runs.
  */
-async function freeComfyMemoryIfTight() {
-  if (!memoryTight()) return;
+async function freeComfyMemoryIfTight(next: ModelSet) {
+  const switching = residentModels !== next;
+  residentModels = next;
+  if (!memoryTight() || !switching) return;
   await fetch("/api/comfy/free", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -77,63 +93,55 @@ async function freeComfyMemoryIfTight() {
   }).catch(() => {});
 }
 
-async function sha1Hex(text: string): Promise<string> {
-  const buf = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(text));
+/** After a failure ComfyUI's state is unknown (it may have crashed mid-load); free next time. */
+function forgetResidentModels() {
+  residentModels = null;
+}
+
+async function sha1Hex(data: string | ArrayBuffer): Promise<string> {
+  const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  const buf = await crypto.subtle.digest("SHA-1", bytes);
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
 }
 
 /**
- * Gives every surface with references pre-encoded IP-Adapter embeddings, encoding only reference
- * sets not already cached. The encode runs as its own small job, so CLIP Vision is never in
- * memory together with the diffusion models. Needs ComfyUI on this machine (files are copied
- * from its output to its input folder); otherwise surfaces keep the in-graph encoder.
+ * Gives every surface with references pre-encoded IP-Adapter embeddings. Files are named by the
+ * references' content (plus models), so the same images reuse one encoding across renders,
+ * projects and browsers; only missing sets are encoded, in a job of their own, so CLIP Vision is
+ * never in memory with the diffusion models. Needs ComfyUI on this machine (files are copied from
+ * its output to its input folder); otherwise surfaces keep the in-graph encoder.
  */
-async function ensureEmbeddings(surfaces: SurfaceInput[], refIds: Partial<Record<BucketId, string[]>>, models: ReturnType<typeof resolveModels>, signal: AbortSignal) {
+async function ensureEmbeddings(surfaces: SurfaceInput[], refHashes: Partial<Record<BucketId, string[]>>, models: ReturnType<typeof resolveModels>, signal: AbortSignal) {
   const { doctor } = get();
   const info = doctor?.objectInfo;
   const withRefs = surfaces.filter((x) => x.refs.length);
   if (!withRefs.length || !doctor?.comfyPath || !models.ipadapter || !models.clipVision || !EMBED_NODES.every((n) => info?.[n])) return;
 
-  const keys = new Map<SurfaceInput, string>();
-  const toEncode: EncodeItem[] = [];
-  const pending = new Map<string, SurfaceInput[]>();
+  const keyOf = new Map<SurfaceInput, string>();
   for (const surf of withRefs) {
-    const key = await sha1Hex([models.ipadapter, models.clipVision, ...(refIds[surf.bucket] ?? surf.refs)].join("|"));
-    keys.set(surf, key);
-    const cached = await kvGet<EmbedFiles>(`emb:${key}`);
-    if (cached) {
-      const check = await (await fetch(`/api/embeds?check=${cached.pos},${cached.neg}`)).json();
-      if (check.exists?.[cached.pos] && check.exists?.[cached.neg]) {
-        surf.embeds = cached;
-        continue;
-      }
-    }
-    if (!pending.has(key)) {
-      pending.set(key, []);
-      // A fresh suffix guarantees SaveEmbeds writes counter 00001 (see embedFileName).
-      toEncode.push({ key: `${key}_${Date.now().toString(36)}`, refs: surf.refs });
-    }
-    pending.get(key)!.push(surf);
+    // Order-independent: the same images in any order average to the same embedding.
+    keyOf.set(surf, await sha1Hex([models.ipadapter, models.clipVision, ...[...(refHashes[surf.bucket] ?? surf.refs)].sort()].join("|")));
   }
-  if (!toEncode.length) return;
+  const keys = [...new Set(keyOf.values())];
+  const names = keys.flatMap((k) => Object.values(embedFiles(k)));
+  const { exists = {} } = await (await fetch(`/api/embeds?check=${names.join(",")}`)).json();
+  const toEncode: EncodeItem[] = keys
+    .filter((k) => !(exists[embedFiles(k).pos] && exists[embedFiles(k).neg]))
+    .map((k) => ({ key: k, refs: [...keyOf].find(([, v]) => v === k)![0].refs }));
 
-  updateJob({ stage: "Encoding reference materials", value: 0, max: 0 });
-  const graph = buildEncodeGraph({ ipadapter: models.ipadapter, clipVision: models.clipVision, items: toEncode });
-  applyDefaults(graph.prompt, info!);
-  const problems = validatePrompt(graph.prompt, info!);
-  if (problems.length) throw new Error(problems[0]);
-  await freeComfyMemoryIfTight();
-  await comfy().run(graph.prompt, graph.stages, { onStage: (stage) => updateJob({ stage }) }, signal);
-
-  const names = Object.values(graph.files).flatMap((f) => [f.pos, f.neg]);
-  const res = await (await fetch("/api/embeds", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ promote: names }) })).json();
-  if (!res.ok) throw new Error(`Reference encoding produced no files (${(res.missing ?? []).join(", ") || res.error}).`);
-  for (const item of toEncode) {
-    const hash = item.key.split("_")[0];
-    const files = graph.files[item.key];
-    await kvSet(`emb:${hash}`, files);
-    for (const surf of pending.get(hash) ?? []) surf.embeds = files;
+  if (toEncode.length) {
+    updateJob({ stage: "Encoding reference materials", value: 0, max: 0 });
+    const graph = buildEncodeGraph({ ipadapter: models.ipadapter, clipVision: models.clipVision, items: toEncode });
+    applyDefaults(graph.prompt, info!);
+    const problems = validatePrompt(graph.prompt, info!);
+    if (problems.length) throw new Error(problems[0]);
+    await freeComfyMemoryIfTight("encode");
+    await comfy().run(graph.prompt, graph.stages, { onStage: (stage) => updateJob({ stage }) }, signal);
+    const prefixes = toEncode.flatMap((t) => Object.values(embedPrefixes(t.key)));
+    const res = await (await fetch("/api/embeds", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ promote: prefixes }) })).json();
+    if (!res.ok) throw new Error(`Reference encoding produced no files (${(res.missing ?? []).join(", ") || res.error}).`);
   }
+  for (const [surf, key] of keyOf) surf.embeds = embedFiles(key);
 }
 
 /** Surfaces that will be repainted: enabled, masked, and given a reference or material. */
@@ -153,6 +161,10 @@ export async function runSegmentation(only?: LayerId[]) {
     toast("SAM3 model not installed: download it in Model Manager, or paint masks by hand.", "error", { label: "Model Manager", run: () => set({ modal: "models" }) });
     return;
   }
+  if (globalFp8Flag() && get().doctor?.device?.type === "cpu") {
+    toast("Auto-detect can't run while ComfyUI uses --fp8_e4m3fn-unet (SAM3 needs full precision on CPU). Restart ComfyUI with plain --cpu: Strata applies fp8 to the render model itself.", "error", { label: "Settings", run: () => set({ modal: "settings" }) });
+    return;
+  }
   const layers = only ?? LAYERS;
   const controller = startJob("segment", "Uploading image");
   try {
@@ -162,7 +174,7 @@ export async function runSegmentation(only?: LayerId[]) {
     applyDefaults(graph.prompt, info);
     const problems = validatePrompt(graph.prompt, info);
     if (problems.length) throw new Error(problems[0]);
-    await freeComfyMemoryIfTight();
+    await freeComfyMemoryIfTight("segment");
     updateJob({ stage: "Loading SAM3" });
     const outputs = await comfy().run(graph.prompt, graph.stages, {
       onStage: (stage) => updateJob({ stage }),
@@ -188,6 +200,7 @@ export async function runSegmentation(only?: LayerId[]) {
     masksChanged(LAYERS, "auto");
     toast(found.length ? `Detected: ${found.join(", ")}. Refine with the brush; Ctrl+Z to undo.` : "Nothing detected. Paint the surfaces by hand.", found.length ? "success" : "info");
   } catch (e) {
+    forgetResidentModels();
     if (e instanceof CancelledError) toast("Detection cancelled");
     else toast(e instanceof Error ? e.message : String(e), "error");
   } finally {
@@ -235,10 +248,13 @@ export async function generate() {
     const union = newMask(masks.width, masks.height);
     const descriptions: string[] = [];
     const refSize = s.profile === "studio" ? 768 : 512;
-    const uploadRef = async (r: { id: string; blobId: string }) => {
+    const refHashes: Partial<Record<BucketId, string[]>> = {};
+    const uploadRef = async (b: BucketId, r: { id: string; blobId: string }) => {
       const bmp = await bitmapFromBlob((await getBlob(r.blobId))!);
       try {
-        return await comfy().upload(await squareCropBlob(bmp, refSize), `${p.id}_ref_${r.id}.png`);
+        const png = await squareCropBlob(bmp, refSize);
+        (refHashes[b] ??= []).push(await sha1Hex(await png.arrayBuffer()));
+        return await comfy().upload(png, `${p.id}_ref_${r.id}.png`);
       } finally {
         bmp.close();
       }
@@ -253,7 +269,7 @@ export async function generate() {
         if (material) descriptions.push(`${material.prompt.split(",")[0]} ${b === "walls" ? "walls" : b}`);
         const [mask, refs] = await Promise.all([
           maskToBwBlob(eff, work.width, work.height).then((blob) => comfy().upload(blob, `${p.id}_mask_${b}.png`)),
-          Promise.all(bucket.refs.map(uploadRef)),
+          Promise.all(bucket.refs.map((r) => uploadRef(b, r))),
         ]);
         return { bucket: b, mask, refs, weight: bucket.weight, prompt: surfacePrompt(b, material, bucket.refs[0]?.analysis, bucket.note) };
       }),
@@ -264,8 +280,7 @@ export async function generate() {
     ]);
     // Diffusion cost scales with pixels, so only the edited region (plus context) is sampled.
     const crop = s.cropToMask === false ? null : planCrop(maskBBox(union, work.width, work.height), work.width, work.height);
-    const refIds = Object.fromEntries(surfacesToRender.map((b) => [b, p.buckets[b].refs.map((r) => r.id)]));
-    await ensureEmbeddings(surfaces, refIds, models, controller.signal);
+    await ensureEmbeddings(surfaces, refHashes, models, controller.signal);
 
     const graph = buildGenerationGraph({
       settings: s,
@@ -282,13 +297,14 @@ export async function generate() {
       seed,
       prefix: `strata/${tag}`,
       crop,
+      fp8Unet: memoryTight(),
     });
     applyDefaults(graph.prompt, info);
     const problems = validatePrompt(graph.prompt, info);
     if (problems.length) throw new Error(problems.slice(0, 2).join(" "));
     graph.warnings.forEach((w) => toast(w, "info"));
 
-    await freeComfyMemoryIfTight();
+    await freeComfyMemoryIfTight("render");
     updateJob({ stage: "Queued" });
     const outputs = await comfy().run(graph.prompt, graph.stages, {
       onStage: (stage) => updateJob({ stage, value: 0, max: 0 }),
@@ -324,6 +340,7 @@ export async function generate() {
     set({ view: "compare" });
     toast(`Render finished in ${formatDuration(record.durationMs)}${finalBlobId ? ` · 4K ${final.width}×${final.height}` : ""}`, "success");
   } catch (e) {
+    forgetResidentModels();
     if (e instanceof CancelledError) toast("Render cancelled");
     else toast(e instanceof Error ? e.message : String(e), "error");
   } finally {
@@ -351,7 +368,7 @@ export async function upscaleRender(renderId?: string): Promise<boolean> {
     const graph = buildUpscaleGraph({ image, upscaleModel: models.upscaleModel, width: final.width, height: final.height, prefix: `strata/${p.id}_${uid()}` });
     applyDefaults(graph.prompt, info);
     if (!models.upscaleModel) toast("No ESRGAN model installed: 4K uses plain resampling. Download 4x-UltraSharp in Model Manager.", "info");
-    await freeComfyMemoryIfTight();
+    // ESRGAN is ~67 MB: never evict the cached render models for it.
     const outputs = await comfy().run(graph.prompt, graph.stages, {
       onStage: (stage) => updateJob({ stage, value: 0, max: 0 }),
       onProgress: (value, max) => updateJob({ value, max }),
@@ -366,6 +383,7 @@ export async function upscaleRender(renderId?: string): Promise<boolean> {
     toast(`4K ready (${final.width}×${final.height}) in ${formatDuration(Date.now() - t0)}`, "success");
     return true;
   } catch (e) {
+    forgetResidentModels();
     if (e instanceof CancelledError) toast("Upscale cancelled");
     else toast(e instanceof Error ? e.message : String(e), "error");
     return false;

@@ -9,6 +9,12 @@ import type { GenSettings, PipelineProfile } from "@/lib/types";
 import { Button, cx, Field, inputClass, NumberInput, Section, Select, Slider, Toggle } from "./ui";
 import { PerfHints } from "./PerfHints";
 
+/** Lite + LCM speed presets; sampling cost scales with pixels × steps (Draft ≈ 0.3× Standard). */
+const QUALITY_PRESETS = [
+  { id: "draft", label: "Draft", hint: "512 px · 4 steps · fastest", workLongSide: 512, steps: 4 },
+  { id: "standard", label: "Standard", hint: "768 px · 6 steps · final", workLongSide: 768, steps: 6 },
+] as const;
+
 export function RenderPanel() {
   const s = useStore((st) => st.project!.settings);
   const doctor = useStore((st) => st.doctor);
@@ -46,6 +52,29 @@ export function RenderPanel() {
         </Field>
         <ModelStatus models={models} useDepth={s.useDepth} useLcm={s.useLcm} online={!!doctor?.online} />
       </Section>
+
+      {s.profile === "lite" && s.useLcm && (
+        <Section title="Quality">
+          <div className="grid grid-cols-2 gap-1.5" role="radiogroup" aria-label="Render quality">
+            {QUALITY_PRESETS.map((q) => {
+              const active = s.workLongSide === q.workLongSide && s.steps === q.steps;
+              return (
+                <button
+                  key={q.id}
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => set({ workLongSide: q.workLongSide, steps: q.steps })}
+                  className={cx("rounded-lg border p-2.5 text-left transition", active ? "border-accent bg-accent-soft/60 ring-1 ring-accent/30" : "border-line hover:bg-paper")}
+                >
+                  <span className="block text-[13px] font-semibold">{q.label}</span>
+                  <span className="mt-0.5 block text-[11px] leading-snug text-mute">{q.hint}</span>
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[11px] leading-snug text-faint">Iterate on materials in Draft, then switch to Standard for the version you keep.</p>
+        </Section>
+      )}
 
       <Section title="Material">
         <Slider label="Material strength" value={s.denoise} min={0.4} max={1} step={0.01} onChange={(v) => set({ denoise: v })} format={(v) => `${Math.round(v * 100)}%`} />

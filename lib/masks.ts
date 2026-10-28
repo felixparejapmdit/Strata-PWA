@@ -14,6 +14,8 @@ class MaskManager {
   width = 0;
   height = 0;
   layers = new Map<LayerId, MaskCanvas>();
+  /** Coverage of each layer as last written to IndexedDB (the UI may already show newer values). */
+  private saved = new Map<LayerId, number>();
   private undo: { layer: LayerId; snapshot: Map<LayerId, MaskCanvas> }[] = [];
   private listeners = new Set<() => void>();
 
@@ -29,6 +31,8 @@ class MaskManager {
   async load(p: Project) {
     this.projectId = p.id;
     this.layers.clear();
+    this.saved.clear();
+    for (const l of LAYERS) this.saved.set(l, p.masks[l]?.coverage ?? 0);
     this.undo = [];
     if (!p.base) {
       this.width = this.height = 0;
@@ -110,13 +114,20 @@ class MaskManager {
     return m;
   }
 
-  async persist(layers: LayerId[], previous: Project["masks"]): Promise<Project["masks"]> {
+  /**
+   * Saves layers as PNG blobs. Layers not in `edited` were only changed by exclusivity, which can
+   * only remove pixels, so an unchanged pixel count means unchanged pixels: those skip the encode.
+   */
+  async persist(layers: LayerId[], previous: Project["masks"], edited: LayerId[] = layers): Promise<Project["masks"]> {
     const next = { ...previous };
     const stale: (string | null)[] = [];
     for (const layer of layers) {
       const m = this.get(layer);
       const coverage = maskCoverage(m);
-      stale.push(previous[layer]?.blobId ?? null);
+      const prev = previous[layer];
+      if (!edited.includes(layer) && this.saved.get(layer) === coverage && (coverage === 0 || prev?.blobId)) continue;
+      this.saved.set(layer, coverage);
+      stale.push(prev?.blobId ?? null);
       next[layer] = {
         blobId: coverage > 0 ? await putBlob(await toBlob(m)) : null,
         source: coverage > 0 ? (previous[layer]?.source ?? "manual") : null,
@@ -129,3 +140,8 @@ class MaskManager {
 }
 
 export const masks = new MaskManager();
+
+/** Coverage of each layer right now, without saving anything (cheap: one getImageData each). */
+export function liveCoverage(layers: LayerId[]): Partial<Record<LayerId, number>> {
+  return Object.fromEntries(layers.map((l) => [l, maskCoverage(masks.get(l))]));
+}

@@ -32,6 +32,8 @@ export interface ReferenceImage {
   blobId: string;
   name: string;
   analysis?: TextureAnalysis;
+  /** SHA-1 of the original file, to reject the same image twice on one surface. */
+  sig?: string;
 }
 
 export interface BucketState {

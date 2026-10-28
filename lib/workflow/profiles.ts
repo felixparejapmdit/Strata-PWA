@@ -6,6 +6,11 @@ export interface ProfileSpec {
   label: string;
   summary: string;
   checkpoints: string[];
+  /**
+   * The checkpoint split into parts (Model Manager "Convert"), so the UNet alone can be stored in
+   * fp8 via UNETLoader on low-memory hosts. Only valid for `splitFrom`.
+   */
+  split?: { from: string; unet: string; clip: string; vae: string };
   lcmLora: string[];
   /** Union ControlNets take a type selector; separate ones are loaded per lock. */
   union: boolean;
@@ -29,7 +34,7 @@ export const USED_NODES = [
   "ImageCompositeMasked", "LoadImage", "LoadImageMask", "LoadDA3Model", "DA3Inference", "DA3Render",
   "IPAdapterModelLoader", "CLIPVisionLoader", "IPAdapterAdvanced", "ImageBatch", "VAEEncode", "SetLatentNoiseMask",
   "KSampler", "VAEDecode", "SaveImage", "UpscaleModelLoader", "ImageUpscaleWithModel", "ImageScale",
-  "UltimateSDUpscale", "MaskToImage", "ImageToMask", "SAM3_Detect", "ImageCrop", "CropMask",
+  "UltimateSDUpscale", "MaskToImage", "ImageToMask", "SAM3_Detect", "ImageCrop", "CropMask", "UNETLoader", "CLIPLoader", "VAELoader",
   "IPAdapterEncoder", "IPAdapterCombineEmbeds", "IPAdapterSaveEmbeds", "IPAdapterLoadEmbeds", "IPAdapterEmbeds",
 ];
 
@@ -42,6 +47,13 @@ export const PROFILES: Record<PipelineProfile, ProfileSpec> = {
     label: "Lite: CPU / ≤8 GB VRAM",
     summary: "SD1.5 + LCM (6 steps), Canny line lock, optional depth lock, IP-Adapter Plus, ESRGAN 4K.",
     checkpoints: ["Realistic_Vision_V5.1_fp16-no-ema.safetensors"],
+    split: {
+      from: "Realistic_Vision_V5.1_fp16-no-ema.safetensors",
+      unet: "Realistic_Vision_V5.1_unet.safetensors",
+      clip: "Realistic_Vision_V5.1_clip_l.safetensors",
+      // The VAE Realistic Vision's authors recommend for this no-VAE checkpoint.
+      vae: "vae-ft-mse-840000-ema-pruned.safetensors",
+    },
     lcmLora: ["lcm-lora-sdv1-5.safetensors"],
     union: false,
     lineControlNet: ["control_v11p_sd15_canny_fp16.safetensors", "control_v11p_sd15_mlsd_fp16.safetensors"],
@@ -126,6 +138,8 @@ export function defaultSettings(profile: PipelineProfile, checkpoint = ""): GenS
 
 export interface ResolvedModels {
   checkpoint: string | null;
+  /** Split UNet / text encoder / VAE for the chosen checkpoint, when all three are installed. */
+  split: { unet: string; clip: string; vae: string } | null;
   lcmLora: string | null;
   lineControlNet: string | null;
   depthControlNet: string | null;
@@ -165,8 +179,14 @@ export function resolveModels(profile: PipelineProfile, settings: Pick<GenSettin
   const p = PROFILES[profile];
   const ckptOptions = comboOptions(info, "CheckpointLoaderSimple", "ckpt_name") ?? [];
   const checkpoint = settings.checkpoint && ckptOptions.includes(settings.checkpoint) ? settings.checkpoint : pickAvailable(info, "CheckpointLoaderSimple", "ckpt_name", p.checkpoints);
+  const sp = p.split;
+  const split =
+    sp && checkpoint === sp.from && pickAvailable(info, "UNETLoader", "unet_name", [sp.unet]) && pickAvailable(info, "CLIPLoader", "clip_name", [sp.clip]) && pickAvailable(info, "VAELoader", "vae_name", [sp.vae])
+      ? { unet: sp.unet, clip: sp.clip, vae: sp.vae }
+      : null;
   return {
     checkpoint,
+    split,
     lcmLora: pickAvailable(info, "LoraLoader", "lora_name", p.lcmLora),
     lineControlNet: pickAvailable(info, "ControlNetLoader", "control_net_name", p.lineControlNet),
     depthControlNet: pickAvailable(info, "ControlNetLoader", "control_net_name", p.depthControlNet),

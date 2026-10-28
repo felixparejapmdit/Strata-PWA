@@ -238,12 +238,14 @@ test("reference encoding runs as its own job and averages like IPAdapterAdvanced
   assert.ok(!types.some((t) => /Checkpoint|KSampler|ControlNet/.test(t)), "no diffusion models in the encode job");
   const combine = Object.values(g.prompt).find((n) => n.class_type === "IPAdapterCombineEmbeds")!;
   assert.equal(combine.inputs.method, "average");
-  assert.deepEqual(g.files.abc_1, { pos: "strata_emb_abc_1_pos_00001.ipadpt", neg: "strata_emb_abc_1_neg_00001.ipadpt" });
+  assert.deepEqual(g.files.abc_1, { pos: "strata_emb_abc_1_pos.ipadpt", neg: "strata_emb_abc_1_neg.ipadpt" });
+  const saves = Object.values(g.prompt).filter((n) => n.class_type === "IPAdapterSaveEmbeds").map((n) => n.inputs.filename_prefix);
+  assert.deepEqual(saves.sort(), ["strata_emb_abc_1_neg", "strata_emb_abc_1_pos"], "saved under the canonical prefixes the server promotes");
 });
 
 test("generation with pre-encoded embeddings never loads CLIP Vision", () => {
   const req = liteRequest();
-  req.surfaces = req.surfaces.map((x) => (x.refs.length ? { ...x, embeds: { pos: "strata_emb_k_pos_00001.ipadpt", neg: "strata_emb_k_neg_00001.ipadpt" } } : x));
+  req.surfaces = req.surfaces.map((x) => (x.refs.length ? { ...x, embeds: { pos: "strata_emb_k_pos.ipadpt", neg: "strata_emb_k_neg.ipadpt" } } : x));
   const g = buildGenerationGraph(req);
   applyDefaults(g.prompt, fullLite);
   assert.deepEqual(validatePrompt(g.prompt, fullLite), []);
@@ -252,4 +254,38 @@ test("generation with pre-encoded embeddings never loads CLIP Vision", () => {
   assert.ok(types.includes("IPAdapterEmbeds") && !types.includes("IPAdapterAdvanced"));
   const apply = Object.values(g.prompt).find((n) => n.class_type === "IPAdapterEmbeds")!;
   assert.ok(apply.inputs.attn_mask, "embeddings stay confined to the surface mask");
+});
+
+const withSplit = withModels({
+  "CheckpointLoaderSimple.ckpt_name": ["sam3.1_multiplex_fp16.safetensors"],
+  "IPAdapterModelLoader.ipadapter_file": ["ip-adapter-plus_sd15.safetensors"],
+  "UpscaleModelLoader.model_name": ["4x-UltraSharp.pth"],
+  "UNETLoader.unet_name": ["Realistic_Vision_V5.1_unet.safetensors"],
+  "CLIPLoader.clip_name": ["Realistic_Vision_V5.1_clip_l.safetensors"],
+});
+
+test("split UNet resolves only when all parts exist for the chosen checkpoint", () => {
+  assert.deepEqual(resolveModels("lite", defaultSettings("lite"), withSplit).split, {
+    unet: "Realistic_Vision_V5.1_unet.safetensors",
+    clip: "Realistic_Vision_V5.1_clip_l.safetensors",
+    vae: "vae-ft-mse-840000-ema-pruned.safetensors",
+  });
+  assert.equal(resolveModels("lite", defaultSettings("lite"), fullLite).split, null, "parts not converted yet");
+  const other = withModels({ "CheckpointLoaderSimple.ckpt_name": ["other_sd15.safetensors"], "UNETLoader.unet_name": ["Realistic_Vision_V5.1_unet.safetensors"], "CLIPLoader.clip_name": ["Realistic_Vision_V5.1_clip_l.safetensors"] });
+  assert.equal(resolveModels("lite", { checkpoint: "other_sd15.safetensors" }, other).split, null, "split parts belong to a different checkpoint");
+});
+
+test("low-memory renders store only the UNet in fp8 (per model, not a global flag)", () => {
+  const settings = defaultSettings("lite");
+  const req = { ...liteRequest({}, withSplit), models: resolveModels("lite", settings, withSplit), fp8Unet: true };
+  const g = buildGenerationGraph(req);
+  applyDefaults(g.prompt, withSplit);
+  assert.deepEqual(validatePrompt(g.prompt, withSplit), []);
+  const types = Object.values(g.prompt).map((n) => n.class_type);
+  assert.ok(!types.includes("CheckpointLoaderSimple"));
+  const unet = Object.values(g.prompt).find((n) => n.class_type === "UNETLoader")!;
+  assert.equal(unet.inputs.weight_dtype, "fp8_e4m3fn");
+  assert.ok(types.includes("CLIPLoader") && types.includes("VAELoader") && types.includes("LoraLoader"));
+  // Without the flag (or without the parts) the full checkpoint is used as before.
+  assert.ok(Object.values(buildGenerationGraph({ ...req, fp8Unet: false }).prompt).some((n) => n.class_type === "CheckpointLoaderSimple"));
 });

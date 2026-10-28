@@ -204,7 +204,31 @@ os.replace(dst + ".part", dst)
 print("wrote", dst, os.path.getsize(dst))
 `;
 
-/** Builds a derived catalogue model (e.g. an fp16 copy) with this ComfyUI's own Python. */
+// Copies the tensors under one key prefix (e.g. the UNet inside a checkpoint) into their own file.
+const EXTRACT_PREFIX = `
+import os, sys
+from safetensors import safe_open
+from safetensors.torch import save_file
+src, dst, prefix = sys.argv[1], sys.argv[2], sys.argv[3]
+out = {}
+with safe_open(src, framework="pt") as f:
+    for key in f.keys():
+        if key.startswith(prefix):
+            out[key[len(prefix):]] = f.get_tensor(key)
+if not out:
+    raise SystemExit("no tensors under " + prefix)
+save_file(out, dst + ".part", metadata={"converted_by": "strata", "source": os.path.basename(src)})
+os.replace(dst + ".part", dst)
+print("wrote", len(out), "tensors to", dst)
+`;
+
+const CONVERSIONS: Record<NonNullable<CatalogModel["convert"]>, { script: string; args: string[] }> = {
+  fp16: { script: FP16_CONVERT, args: [] },
+  "extract-unet": { script: EXTRACT_PREFIX, args: ["model.diffusion_model."] },
+  "extract-clip": { script: EXTRACT_PREFIX, args: ["cond_stage_model.transformer."] },
+};
+
+/** Builds a derived catalogue model (fp16 copy, or a part of a checkpoint) with this ComfyUI's own Python. */
 export function startConversion(comfyPath: string, target: CatalogModel, source: CatalogModel): Job {
   const existing = jobs.get(target.id);
   if (existing?.status === "running") return existing;
@@ -214,7 +238,8 @@ export function startConversion(comfyPath: string, target: CatalogModel, source:
     if (!isInstalled(comfyPath, source)) throw new Error(`Install "${source.name}" first.`);
     const py = findComfyPython(comfyPath);
     if (!py) throw new Error("Could not find ComfyUI's Python.");
-    await run(job, py, ["-c", FP16_CONVERT, modelPath(comfyPath, source), modelPath(comfyPath, target)], comfyPath);
+    const { script, args } = CONVERSIONS[target.convert ?? "fp16"];
+    await run(job, py, ["-c", script, modelPath(comfyPath, source), modelPath(comfyPath, target), ...args], comfyPath);
     job.status = "done";
   })().catch((e: unknown) => {
     job.status = "error";

@@ -1,6 +1,6 @@
 import type { PipelineProfile } from "./types";
 
-export type ModelRole = "checkpoint" | "lora" | "controlnet" | "ipadapter" | "clip_vision" | "depth" | "segmentation" | "upscale";
+export type ModelRole = "checkpoint" | "unet" | "text_encoder" | "lora" | "controlnet" | "ipadapter" | "clip_vision" | "depth" | "segmentation" | "upscale";
 
 export interface CatalogModel {
   id: string;
@@ -17,6 +17,8 @@ export interface CatalogModel {
   note?: string;
   /** Produced locally from another catalogue model instead of downloaded (url is unused). */
   convertFrom?: string;
+  /** How a derived model is produced from `convertFrom`. */
+  convert?: "fp16" | "extract-unet" | "extract-clip";
 }
 
 /**
@@ -60,6 +62,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     profiles: ["lite", "studio"],
     required: false,
     convertFrom: "clip-vision-h",
+    convert: "fp16",
     note: "Half-size copy of the encoder above, made locally. ComfyUI already runs it in fp16 on CPU, so results are identical, but loading no longer needs ~3.8 GB at once. Recommended on 8 GB machines.",
   },
   {
@@ -85,6 +88,34 @@ export const MODEL_CATALOG: CatalogModel[] = [
     bytes: 2132625894,
     profiles: ["lite"],
     required: true,
+  },
+  {
+    id: "rv51-unet",
+    name: "Realistic Vision 5.1 UNet (low-memory renders)",
+    role: "unet",
+    dir: "diffusion_models",
+    filename: "Realistic_Vision_V5.1_unet.safetensors",
+    url: "",
+    bytes: 0,
+    profiles: ["lite"],
+    required: false,
+    convertFrom: "rv51",
+    convert: "extract-unet",
+    note: "The checkpoint's diffusion model on its own, so Strata can store it in fp8 (a quarter of fp32) for renders without a global ComfyUI flag that would break Auto-detect. Recommended on 8 GB machines; convert this and the text encoder below.",
+  },
+  {
+    id: "rv51-clip",
+    name: "Realistic Vision 5.1 text encoder (low-memory renders)",
+    role: "text_encoder",
+    dir: "text_encoders",
+    filename: "Realistic_Vision_V5.1_clip_l.safetensors",
+    url: "",
+    bytes: 0,
+    profiles: ["lite"],
+    required: false,
+    convertFrom: "rv51",
+    convert: "extract-clip",
+    note: "The checkpoint's CLIP-L text encoder on its own, used together with the UNet above.",
   },
   {
     id: "lcm-sd15",

@@ -214,7 +214,7 @@ export function Canvas() {
       } else {
         unionInto(masks.get(layer), sel);
         masks.exclusive(layer);
-        masksChanged([...LAYERS]);
+        masksChanged([...LAYERS], "manual", [layer]);
       }
       return;
     }
@@ -251,7 +251,7 @@ export function Canvas() {
     if (g?.kind === "paint") {
       if (!g.erase) {
         masks.exclusive(layer);
-        masksChanged([...LAYERS]);
+        masksChanged([...LAYERS], "manual", [layer]);
       } else {
         masksChanged([layer]);
       }

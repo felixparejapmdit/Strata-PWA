@@ -92,10 +92,18 @@ class ComfyClient {
         if (finished) return;
         cleanup();
         try {
-          const h = await (await fetch(`/api/comfy/history/${promptId}`)).json();
-          const entry = h[promptId];
-          if (entry?.status?.status_str === "error") reject(new Error(historyError(entry)));
-          else resolve(entry?.outputs ?? {});
+          // ComfyUI announces completion (executing:null / execution_success) from its executor
+          // *before* its queue worker writes the history entry. Reading history once at that moment
+          // returned nothing on slow machines and the finished render was dropped, so wait for it.
+          const deadline = Date.now() + 120_000;
+          for (;;) {
+            const res = await fetch(`/api/comfy/history/${promptId}`);
+            const entry = res.ok ? (await res.json())[promptId] : undefined;
+            if (entry?.status?.status_str === "error") return reject(new Error(historyError(entry)));
+            if (entry?.status?.completed) return resolve(entry.outputs ?? {});
+            if (Date.now() > deadline) return reject(new Error("ComfyUI reported the job finished, but its result never appeared. Check ComfyUI's output folder."));
+            await new Promise((r) => setTimeout(r, 1000));
+          }
         } catch (e) {
           reject(e);
         }

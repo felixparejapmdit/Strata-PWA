@@ -10,13 +10,17 @@ export interface EmbedFiles {
 }
 
 export interface EncodeItem {
-  /** Unique, filename-safe id for this reference set. */
+  /** Content hash of the reference set (+ models); identical images always map to the same files. */
   key: string;
   refs: string[];
 }
 
-/** ComfyUI's SaveEmbeds writes `{prefix}_{counter:05}.ipadpt`; a fresh prefix always gets 00001. */
-export const embedFileName = (prefix: string) => `${prefix}_00001.ipadpt`;
+/** SaveEmbeds writes `{prefix}_{counter:05}.ipadpt` to output/; Strata promotes the newest to `{prefix}.ipadpt` in input/. */
+export const embedPrefixes = (key: string) => ({ pos: `strata_emb_${key}_pos`, neg: `strata_emb_${key}_neg` });
+export const embedFiles = (key: string): EmbedFiles => {
+  const p = embedPrefixes(key);
+  return { pos: `${p.pos}.ipadpt`, neg: `${p.neg}.ipadpt` };
+};
 
 /**
  * Encodes reference images into IP-Adapter embeddings in a job of their own, so the CLIP Vision
@@ -42,11 +46,10 @@ export function buildEncodeGraph(req: { ipadapter: string; clipVision: string; i
     const enc = g.add("IPAdapterEncoder", { ipadapter: Graph.out(ipa, 0), image: img, weight: 1, clip_vision: Graph.out(cv, 0) }, "Encode references");
     stages[enc] = "Encoding reference materials";
     const avg = g.add("IPAdapterCombineEmbeds", { embed1: Graph.out(enc, 0), method: "average" });
-    const pos = `strata_emb_${item.key}_pos`;
-    const neg = `strata_emb_${item.key}_neg`;
+    const { pos, neg } = embedPrefixes(item.key);
     g.add("IPAdapterSaveEmbeds", { embeds: Graph.out(avg, 0), filename_prefix: pos });
     g.add("IPAdapterSaveEmbeds", { embeds: Graph.out(enc, 1), filename_prefix: neg });
-    files[item.key] = { pos: embedFileName(pos), neg: embedFileName(neg) };
+    files[item.key] = embedFiles(item.key);
   }
   return { prompt: g.prompt, files, stages };
 }

@@ -4,3 +4,6 @@ out
 .strata
 *.tsbuildinfo
 next-env.d.ts
+.playwright-mcp
+test-results
+playwright-report
